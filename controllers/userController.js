@@ -1,6 +1,6 @@
-const connection = require('../config/db');
+const connection = require('./db'); // Note: Ensure this matches your file path (./db.js)
 
-// 1. GET ALL LISTINGS (Replaces get_listings.php)
+// 1. GET ALL LISTINGS
 exports.getAllUsers = (req, res) => {
     const sql = `
         SELECT l.*, u.full_name as landlordName, u.contact 
@@ -27,7 +27,7 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 3. CREATE NEW LISTING (Replaces save_listing.php logic)
+// 3. CREATE NEW LISTING
 exports.createUser = (req, res) => {
     const { title, category, price, location, rooms, size, amenities, user_id } = req.body;
     const sql = `INSERT INTO listings 
@@ -67,8 +67,9 @@ exports.deleteUser = (req, res) => {
         else
             res.status(404).json({ message: 'Listing not found' });
     });
-    
-    // 6. UPDATE USER PROFILE (For dashboard.html)
+}; 
+
+// 6. UPDATE USER PROFILE
 exports.updateProfile = (req, res) => {
     const { name, address, contact, role, email } = req.body;
     const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ? WHERE email = ?`;
