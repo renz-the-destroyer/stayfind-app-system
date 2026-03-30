@@ -1,4 +1,5 @@
-const connection = require('./db');
+const path = require('path');
+const connection = require(path.join(__dirname, '..', 'db.js'));
 
 // 1. GET ALL LISTINGS
 exports.getAllUsers = (req, res) => {
