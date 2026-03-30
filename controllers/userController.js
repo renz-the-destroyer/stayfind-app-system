@@ -1,4 +1,4 @@
-const connection = require('../db');
+const connection = require('../db.js');
 
 // 1. GET ALL LISTINGS
 exports.getAllUsers = (req, res) => {
