@@ -1,4 +1,4 @@
-const db = require('../config/db')
+const db = require('../config/db');
 
 // 1. GET ALL LISTINGS
 exports.getAllUsers = (req, res) => {
