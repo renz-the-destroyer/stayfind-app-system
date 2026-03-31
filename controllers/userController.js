@@ -62,11 +62,11 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE (With 30-Day Info Restriction)
+// 6. UPDATE USER PROFILE (Fixed for New Account Setup)
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
-    // First, fetch current data to check last update time
+    // Fetch current data to check last update time and existing values
     db.query('SELECT full_name, address, contact, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
@@ -78,6 +78,9 @@ exports.updateProfile = (req, res) => {
         // Calculate difference in days
         const diffInDays = Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24));
 
+        // Logic: Check if it's the first time setting up (Address or Contact are empty/null)
+        const isFirstTimeSetup = (!user.address || user.address === "") || (!user.contact || user.contact === "");
+
         // Logic: Check if Name, Address, or Contact is actually changing
         const isChangingPersonalInfo = (
             full_name !== user.full_name || 
@@ -85,16 +88,15 @@ exports.updateProfile = (req, res) => {
             contact !== user.contact
         );
 
-        // RESTRICTION: Block info change if it's been less than 30 days
-        // Role changes (role !== user.role) are NOT blocked by this logic
-        if (isChangingPersonalInfo && diffInDays < 30) {
+        // RESTRICTION: Block change only if it's NOT a first-time setup AND less than 30 days passed
+        if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
             return res.status(403).json({ 
                 success: false, 
                 message: `Personal information can only be changed once every 30 days. Please wait ${30 - diffInDays} more days.` 
             });
         }
 
-        // Allow update if 30 days passed OR if only the role is being changed
+        // Allow update
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, updated_at = NOW() WHERE email = ?`;
         db.query(sql, [full_name, address, contact, role, email], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
