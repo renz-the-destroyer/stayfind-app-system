@@ -5,7 +5,7 @@ const cors = require('cors');
 // ENVIRONMENT VARIABLES
 require('dotenv').config();
 // DATABASE CONNECTION
-const db = require('./config/db.js');
+const db = require('../config/db');
 // ROUTES
 const routes = require('./routes/index.js');
 
