@@ -6,9 +6,9 @@ const userController = require('../controllers/userController');
 // You can visit https://stayfind-app-system.onrender.com/api/test to see if it's working
 router.get('/test', (req, res) => res.json({ message: "API is Online and Connected!" }));
 
-// --- 2. USER VIEWING ROUTES ---
-// This matches your home.js loadListings() fetch
-router.get('/view', userController.getAllUsers); 
+// --- 2. LISTING & USER VIEWING ROUTES ---
+// This matches your home.js loadListings() fetch - now pointed to property listings
+router.get('/view', userController.getAllListings); 
 router.get('/view/:id', userController.getUserById);
 
 // --- 3. ACCOUNT CREATION & MANAGEMENT ---
@@ -16,7 +16,11 @@ router.post('/add', userController.createUser);
 router.put('/update', userController.updateUser);
 router.delete('/delete', userController.deleteUser);
 
-// --- 4. PROFILE & DASHBOARD ROUTES ---
+// --- 4. PROPERTY LISTING ROUTES ---
+// This handles the "Publish Listing" button from home.js
+router.post('/add-listing', userController.addListing);
+
+// --- 5. PROFILE & DASHBOARD ROUTES ---
 // This handles the Dashboard setup and the new Settings Modal in home.html
 router.post('/update-profile', userController.updateProfile);
 
