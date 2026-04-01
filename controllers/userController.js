@@ -66,7 +66,6 @@ exports.getUserById = (req, res) => {
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
-    // Fetch current data to check last update time and existing values
     db.query('SELECT full_name, address, contact, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
@@ -74,21 +73,10 @@ exports.updateProfile = (req, res) => {
         const user = results[0];
         const lastUpdate = new Date(user.updated_at);
         const now = new Date();
-        
-        // Calculate difference in days
         const diffInDays = Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24));
-
-        // Logic: Check if it's the first time setting up (Address or Contact are empty/null)
         const isFirstTimeSetup = (!user.address || user.address === "") || (!user.contact || user.contact === "");
+        const isChangingPersonalInfo = (full_name !== user.full_name || address !== user.address || contact !== user.contact);
 
-        // Logic: Check if Name, Address, or Contact is actually changing
-        const isChangingPersonalInfo = (
-            full_name !== user.full_name || 
-            address !== user.address || 
-            contact !== user.contact
-        );
-
-        // RESTRICTION: Block change only if it's NOT a first-time setup AND less than 30 days passed
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
             return res.status(403).json({ 
                 success: false, 
@@ -96,7 +84,6 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        // Allow update
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, updated_at = NOW() WHERE email = ?`;
         db.query(sql, [full_name, address, contact, role, email], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
@@ -106,5 +93,34 @@ exports.updateProfile = (req, res) => {
                 res.status(404).json({ success: false, message: 'User not found' });
             }
         });
+    });
+};
+
+// --- NEW LISTING LOGIC ADDED BELOW ---
+
+// 7. GET ALL LISTINGS (For home.js loadListings)
+exports.getAllListings = (req, res) => {
+    const sql = "SELECT * FROM listings ORDER BY created_at DESC";
+    db.query(sql, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// 8. ADD NEW LISTING (For home.js Publish button)
+exports.addListing = (req, res) => {
+    const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail } = req.body;
+    
+    const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    
+    const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail];
+
+    db.query(sql, values, (err, result) => {
+        if (err) {
+            console.error("SQL Error:", err.message);
+            return res.status(500).json({ success: false, error: err.message });
+        }
+        res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
     });
 };
