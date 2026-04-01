@@ -14,8 +14,9 @@ const app = express();
 
 // MIDDLEWARES
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// UPDATED: Increased limit to 50mb to allow Base64 image uploads
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // USE ROUTES
 // Dahil '/api' ang prefix mo, ang endpoints mo ay magiging:
