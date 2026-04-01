@@ -96,11 +96,16 @@ exports.updateProfile = (req, res) => {
     });
 };
 
-// --- NEW LISTING LOGIC ADDED BELOW ---
+// --- UPDATED LISTING LOGIC ---
 
-// 7. GET ALL LISTINGS (For home.js loadListings)
+// 7. GET ALL LISTINGS (Now includes Landlord Name and Contact)
 exports.getAllListings = (req, res) => {
-    const sql = "SELECT * FROM listings ORDER BY created_at DESC";
+    const sql = `
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
+        FROM listings l 
+        JOIN users u ON l.user_id = u.id 
+        ORDER BY l.created_at DESC`;
+        
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
@@ -122,5 +127,27 @@ exports.addListing = (req, res) => {
             return res.status(500).json({ success: false, error: err.message });
         }
         res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
+    });
+};
+
+// 9. ADD REVIEW (Ratings and Comments)
+exports.addReview = (req, res) => {
+    const { listing_id, user_id, user_name, comment, rating } = req.body;
+    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating) VALUES (?, ?, ?, ?, ?)`;
+    
+    db.query(sql, [listing_id, user_id, user_name, comment, rating], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ success: true, message: 'Review submitted!' });
+    });
+};
+
+// 10. GET REVIEWS FOR A SPECIFIC LISTING
+exports.getReviews = (req, res) => {
+    const { listing_id } = req.params;
+    const sql = `SELECT * FROM reviews WHERE listing_id = ? ORDER BY created_at DESC`;
+    
+    db.query(sql, [listing_id], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
     });
 };
