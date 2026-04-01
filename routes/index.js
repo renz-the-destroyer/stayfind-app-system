@@ -11,6 +11,9 @@ router.get('/test', (req, res) => res.json({ message: "API is Online and Connect
 router.get('/view', userController.getAllListings); 
 router.get('/view/:id', userController.getUserById);
 
+// ADDED: Specific route for Login/Authentication to fetch the user table
+router.get('/users', userController.getAllUsers);
+
 // --- 3. ACCOUNT CREATION & MANAGEMENT ---
 router.post('/add', userController.createUser);
 router.put('/update', userController.updateUser);
