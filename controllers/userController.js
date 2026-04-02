@@ -62,7 +62,7 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE (Fixed: Strict comparison to prevent false errors)
+// 6. UPDATE USER PROFILE (Updated with Case-Insensitive Comparison and Logging)
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
@@ -73,33 +73,35 @@ exports.updateProfile = (req, res) => {
         const user = results[0];
         const lastUpdate = user.updated_at ? new Date(user.updated_at) : null;
         const now = new Date();
-        
-        // Calculate days since last update
         const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
 
-        // logic: Use .trim() to compare actual values. 
-        // This prevents the error if you just click "Save" without changing the text.
-        const isChangingPersonalInfo = (
-            (full_name && full_name.trim() !== (user.full_name || "").trim()) || 
-            (address && address.trim() !== (user.address || "").trim()) || 
-            (contact && contact.trim() !== (user.contact || "").trim())
-        );
+        // Helper function to compare text while ignoring Case and Spaces
+        const hasActuallyChanged = (newVal, oldVal) => {
+            const cleanNew = (newVal || "").toString().trim().toLowerCase();
+            const cleanOld = (oldVal || "").toString().trim().toLowerCase();
+            return cleanNew !== cleanOld;
+        };
 
-        // logic: Skip check if they haven't set an address or contact yet (Initial Setup)
+        const isChangingPersonalInfo = 
+            hasActuallyChanged(full_name, user.full_name) || 
+            hasActuallyChanged(address, user.address) || 
+            hasActuallyChanged(contact, user.contact);
+
+        // LOGGING: This will show in your VS Code Terminal
+        console.log(`--- Update Attempt for ${email} ---`);
+        console.log(`Is Changing Info? ${isChangingPersonalInfo} | Days since last update: ${diffInDays}`);
+
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
 
-        // BLOCK ONLY IF: It's NOT the first setup AND they are actually changing INFO AND it's been less than 30 days
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
+            console.log("Blocked: Change attempted too soon.");
             return res.status(403).json({ 
                 success: false, 
                 message: `Personal information can only be changed once every 30 days. Please wait ${30 - diffInDays} more days.` 
             });
         }
 
-        // Logic: ONLY update 'updated_at' if personal info was changed. 
-        // Changing 'role' does NOT reset the 30-day timer.
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
-
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, ${timestampSQL} WHERE email = ?`;
         
         db.query(sql, [
@@ -118,8 +120,6 @@ exports.updateProfile = (req, res) => {
         });
     });
 };
-
-// --- UPDATED LISTING LOGIC ---
 
 // 7. GET ALL LISTINGS
 exports.getAllListings = (req, res) => {
