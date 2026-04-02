@@ -174,3 +174,23 @@ exports.getReviews = (req, res) => {
         res.json(rows);
     });
 };
+
+// 11. DELETE LISTING (NEW)
+// Ensures only the owner can delete their own listing
+exports.deleteListing = (req, res) => {
+    const listingId = req.params.id;
+    const { user_id } = req.body; // Sent from frontend to verify ownership
+
+    const sql = "DELETE FROM listings WHERE id = ? AND user_id = ?";
+    
+    db.query(sql, [listingId, user_id], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        
+        if (result.affectedRows > 0) {
+            res.json({ success: true, message: 'Listing deleted successfully' });
+        } else {
+            // This happens if the ID doesn't exist OR the user_id doesn't match
+            res.status(403).json({ success: false, message: 'Unauthorized or Listing not found' });
+        }
+    });
+};
