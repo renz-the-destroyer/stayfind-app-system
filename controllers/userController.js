@@ -62,11 +62,11 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE (Fixed: Roles can change anytime, Info once a month)
+// 6. UPDATE USER PROFILE (Fixed: Strict comparison to prevent false errors)
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
-    db.query('SELECT full_name, address, contact, updated_at FROM users WHERE email = ?', [email], (err, results) => {
+    db.query('SELECT full_name, address, contact, role, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -77,17 +77,18 @@ exports.updateProfile = (req, res) => {
         // Calculate days since last update
         const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
 
-        // logic: Check if any personal text fields are actually different from the DB
+        // logic: Use .trim() to compare actual values. 
+        // This prevents the error if you just click "Save" without changing the text.
         const isChangingPersonalInfo = (
-            (full_name && full_name !== user.full_name) || 
-            (address && address !== user.address) || 
-            (contact && contact !== user.contact)
+            (full_name && full_name.trim() !== (user.full_name || "").trim()) || 
+            (address && address.trim() !== (user.address || "").trim()) || 
+            (contact && contact.trim() !== (user.contact || "").trim())
         );
 
-        // logic: Skip check if they haven't set an address or contact yet
+        // logic: Skip check if they haven't set an address or contact yet (Initial Setup)
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
 
-        // BLOCK ONLY IF: It's NOT the first setup AND they are changing INFO AND it's been less than 30 days
+        // BLOCK ONLY IF: It's NOT the first setup AND they are actually changing INFO AND it's been less than 30 days
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
             return res.status(403).json({ 
                 success: false, 
@@ -95,13 +96,19 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        // Only update 'updated_at' column if personal info was modified.
-        // This ensures role-only changes don't trigger the 30-day cooldown.
+        // Logic: ONLY update 'updated_at' if personal info was changed. 
+        // Changing 'role' does NOT reset the 30-day timer.
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
 
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, ${timestampSQL} WHERE email = ?`;
         
-        db.query(sql, [full_name, address, contact, role, email], (err, result) => {
+        db.query(sql, [
+            full_name || user.full_name, 
+            address || user.address, 
+            contact || user.contact, 
+            role || user.role, 
+            email
+        ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
             if (result.affectedRows > 0) {
                 res.json({ success: true, message: 'Profile updated successfully' });
@@ -114,7 +121,7 @@ exports.updateProfile = (req, res) => {
 
 // --- UPDATED LISTING LOGIC ---
 
-// 7. GET ALL LISTINGS (Now includes Landlord Name and Contact)
+// 7. GET ALL LISTINGS
 exports.getAllListings = (req, res) => {
     const sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
@@ -128,7 +135,7 @@ exports.getAllListings = (req, res) => {
     });
 };
 
-// 8. ADD NEW LISTING (For home.js Publish button)
+// 8. ADD NEW LISTING
 exports.addListing = (req, res) => {
     const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail } = req.body;
     
@@ -146,7 +153,7 @@ exports.addListing = (req, res) => {
     });
 };
 
-// 9. ADD REVIEW (Ratings and Comments)
+// 9. ADD REVIEW
 exports.addReview = (req, res) => {
     const { listing_id, user_id, user_name, comment, rating } = req.body;
     const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating) VALUES (?, ?, ?, ?, ?)`;
