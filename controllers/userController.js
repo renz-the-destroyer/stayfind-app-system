@@ -62,7 +62,7 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE (Fixed for New Account Setup)
+// 6. UPDATE USER PROFILE (Fixed: Roles can change anytime, Info once a month)
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
@@ -71,12 +71,23 @@ exports.updateProfile = (req, res) => {
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
         const user = results[0];
-        const lastUpdate = new Date(user.updated_at);
+        const lastUpdate = user.updated_at ? new Date(user.updated_at) : null;
         const now = new Date();
-        const diffInDays = Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24));
-        const isFirstTimeSetup = (!user.address || user.address === "") || (!user.contact || user.contact === "");
-        const isChangingPersonalInfo = (full_name !== user.full_name || address !== user.address || contact !== user.contact);
+        
+        // Calculate days since last update
+        const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
 
+        // logic: Is the user actually trying to change their personal text fields?
+        const isChangingPersonalInfo = (
+            (full_name && full_name !== user.full_name) || 
+            (address && address !== user.address) || 
+            (contact && contact !== user.contact)
+        );
+
+        // logic: Is this the first time they are filling out their profile?
+        const isFirstTimeSetup = (!user.address || user.address === "") || (!user.contact || user.contact === "");
+
+        // BLOCK ONLY IF: Not first setup AND they are changing INFO AND it's been < 30 days
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
             return res.status(403).json({ 
                 success: false, 
@@ -84,7 +95,12 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, updated_at = NOW() WHERE email = ?`;
+        // Only update 'updated_at' if personal info was changed. 
+        // If only the 'role' was changed, we keep the old timestamp so they can still change info later.
+        const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
+
+        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, ${timestampSQL} WHERE email = ?`;
+        
         db.query(sql, [full_name, address, contact, role, email], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
             if (result.affectedRows > 0) {
