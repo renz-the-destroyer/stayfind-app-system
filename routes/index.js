@@ -23,8 +23,18 @@ router.delete('/delete', userController.deleteUser);
 // This handles the "Publish Listing" button from home.js
 router.post('/add-listing', userController.addListing);
 
+// NEW: Delete a specific listing (Called by deleteListing() in home.js)
+router.delete('/delete-listing/:id', userController.deleteListing);
+
 // --- 5. PROFILE & DASHBOARD ROUTES ---
 // This handles the Dashboard setup and the new Settings Modal in home.html
 router.post('/update-profile', userController.updateProfile);
+
+// --- 6. REVIEWS & RATINGS ROUTES ---
+// NEW: Post a new comment or star rating
+router.post('/add-review', userController.addReview);
+
+// NEW: Fetch all reviews for a specific listing (Called when opening detailsModal)
+router.get('/get-reviews/:listing_id', userController.getReviews);
 
 module.exports = router;
