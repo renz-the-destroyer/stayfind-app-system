@@ -77,17 +77,17 @@ exports.updateProfile = (req, res) => {
         // Calculate days since last update
         const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
 
-        // logic: Is the user actually trying to change their personal text fields?
+        // logic: Check if any personal text fields are actually different from the DB
         const isChangingPersonalInfo = (
             (full_name && full_name !== user.full_name) || 
             (address && address !== user.address) || 
             (contact && contact !== user.contact)
         );
 
-        // logic: Is this the first time they are filling out their profile?
-        const isFirstTimeSetup = (!user.address || user.address === "") || (!user.contact || user.contact === "");
+        // logic: Skip check if they haven't set an address or contact yet
+        const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
 
-        // BLOCK ONLY IF: Not first setup AND they are changing INFO AND it's been < 30 days
+        // BLOCK ONLY IF: It's NOT the first setup AND they are changing INFO AND it's been less than 30 days
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
             return res.status(403).json({ 
                 success: false, 
@@ -95,8 +95,8 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        // Only update 'updated_at' if personal info was changed. 
-        // If only the 'role' was changed, we keep the old timestamp so they can still change info later.
+        // Only update 'updated_at' column if personal info was modified.
+        // This ensures role-only changes don't trigger the 30-day cooldown.
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
 
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, ${timestampSQL} WHERE email = ?`;
