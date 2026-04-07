@@ -50,15 +50,19 @@ app.get('/api/get-bookmarks/:userId', (req, res) => {
 
 // --- NEW: EDIT/UPDATE PROPERTY ENDPOINT ---
 app.post('/api/update-listing', (req, res) => {
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
+    // UPDATED: Added thumbnail and images to the destructuring to match home.js
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities, thumbnail, images } = req.body;
 
+    // UPDATED: The SQL now handles image updates if they are provided
     const query = `
         UPDATE listings 
-        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=? 
+        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=?, 
+            thumbnail = COALESCE(?, thumbnail), 
+            images = COALESCE(?, images)
         WHERE id=? AND user_id=?
     `;
 
-    db.query(query, [title, category, price, location, rooms, size, amenities, listingId, user_id], (err, result) => {
+    db.query(query, [title, category, price, location, rooms, size, amenities, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) {
             console.error("Update Error:", err);
             return res.status(500).json(err);
