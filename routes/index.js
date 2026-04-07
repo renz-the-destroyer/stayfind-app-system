@@ -37,4 +37,17 @@ router.post('/add-review', userController.addReview);
 // NEW: Fetch all reviews for a specific listing (Called when opening detailsModal)
 router.get('/get-reviews/:listing_id', userController.getReviews);
 
+
+// --- UPDATED ADDITIONS BELOW (DO NOT REMOVE PREVIOUS CODES) ---
+
+// 7. UPDATE PROPERTY LISTING (Required for Edit Mode in home.js)
+router.post('/update-listing', userController.updateListing);
+
+// 8. BOOKMARK SYSTEM (Required for heart icon persistence in home.js)
+// Toggle add/remove bookmark
+router.post('/toggle-bookmark', userController.toggleBookmark);
+
+// Fetch saved bookmarks for sync
+router.get('/get-bookmarks/:id', userController.getBookmarks);
+
 module.exports = router;
