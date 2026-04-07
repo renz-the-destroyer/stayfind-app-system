@@ -22,7 +22,7 @@ exports.createUser = (req, res) => {
     });
 };
 
-// 3. UPDATE USER (Admin-style update used by index.js routes)
+// 3. UPDATE USER
 exports.updateUser = (req, res) => {
     const { id, full_name, email, role } = req.body;
     const sql = `UPDATE users SET full_name = ?, email = ?, role = ? WHERE id = ?`;
@@ -62,7 +62,7 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE (Updated with Case-Insensitive Comparison and Logging)
+// 6. UPDATE USER PROFILE
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
@@ -75,7 +75,6 @@ exports.updateProfile = (req, res) => {
         const now = new Date();
         const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
 
-        // Helper function to compare text while ignoring Case and Spaces
         const hasActuallyChanged = (newVal, oldVal) => {
             const cleanNew = (newVal || "").toString().trim().toLowerCase();
             const cleanOld = (oldVal || "").toString().trim().toLowerCase();
@@ -87,14 +86,10 @@ exports.updateProfile = (req, res) => {
             hasActuallyChanged(address, user.address) || 
             hasActuallyChanged(contact, user.contact);
 
-        // LOGGING: This will show in your VS Code Terminal
         console.log(`--- Update Attempt for ${email} ---`);
-        console.log(`Is Changing Info? ${isChangingPersonalInfo} | Days since last update: ${diffInDays}`);
-
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
 
         if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
-            console.log("Blocked: Change attempted too soon.");
             return res.status(403).json({ 
                 success: false, 
                 message: `Personal information can only be changed once every 30 days. Please wait ${30 - diffInDays} more days.` 
@@ -112,18 +107,13 @@ exports.updateProfile = (req, res) => {
             email
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
-            if (result.affectedRows > 0) {
-                res.json({ success: true, message: 'Profile updated successfully' });
-            } else {
-                res.status(404).json({ success: false, message: 'User not found' });
-            }
+            res.json({ success: true, message: 'Profile updated successfully' });
         });
     });
 };
 
-// 7. GET ALL LISTINGS (Updated for Landlord Privacy Logic)
+// 7. GET ALL LISTINGS (Strict Landlord Filtering)
 exports.getAllListings = (req, res) => {
-    // We expect the frontend to pass role and user_id as query parameters
     const { role, user_id } = req.query;
 
     let sql = `
@@ -133,7 +123,7 @@ exports.getAllListings = (req, res) => {
 
     let queryParams = [];
 
-    // If the user is a landlord, filter to only show their own listings
+    // Filter logic: If role is landlord, they ONLY see listings where they are the owner
     if (role === 'landlord' && user_id) {
         sql += ` WHERE l.user_id = ?`;
         queryParams.push(user_id);
@@ -150,39 +140,37 @@ exports.getAllListings = (req, res) => {
 // 8. ADD NEW LISTING
 exports.addListing = (req, res) => {
     const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail } = req.body;
-    
     const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
     const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail];
 
     db.query(sql, values, (err, result) => {
-        if (err) {
-            console.error("SQL Error:", err.message);
-            return res.status(500).json({ success: false, error: err.message });
-        }
+        if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
     });
 };
 
-// 9. ADD REVIEW (Updated to support Landlord Replies)
+// 9. ADD REVIEW (Supports Landlord Replies)
 exports.addReview = (req, res) => {
-    // added 'is_reply' and 'parent_id' for threaded responses if needed, or just is_reply
     const { listing_id, user_id, user_name, comment, rating, is_reply } = req.body;
     
-    // We include is_reply (1 for landlord reply, 0 for tenant review)
+    // rating is 0 if it's a landlord reply
+    const finalRating = is_reply ? 0 : (rating || 0);
+    const finalReplyStatus = is_reply ? 1 : 0;
+
     const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply) VALUES (?, ?, ?, ?, ?, ?)`;
     
-    db.query(sql, [listing_id, user_id, user_name, comment, rating || 0, is_reply || 0], (err, result) => {
+    db.query(sql, [listing_id, user_id, user_name, comment, finalRating, finalReplyStatus], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true, message: is_reply ? 'Reply submitted!' : 'Review submitted!' });
+        res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
     });
 };
 
-// 10. GET REVIEWS FOR A SPECIFIC LISTING
+// 10. GET REVIEWS (Ordered by Date)
 exports.getReviews = (req, res) => {
     const { listing_id } = req.params;
-    const sql = `SELECT * FROM reviews WHERE listing_id = ? ORDER BY created_at DESC`;
+    // We order by created_at so replies appear in sequence
+    const sql = `SELECT * FROM reviews WHERE listing_id = ? ORDER BY created_at ASC`;
     
     db.query(sql, [listing_id], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -190,7 +178,7 @@ exports.getReviews = (req, res) => {
     });
 };
 
-// 11. DELETE LISTING (NEW)
+// 11. DELETE LISTING
 exports.deleteListing = (req, res) => {
     const listingId = req.params.id;
     const { user_id } = req.body; 
@@ -199,7 +187,6 @@ exports.deleteListing = (req, res) => {
     
     db.query(sql, [listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
-        
         if (result.affectedRows > 0) {
             res.json({ success: true, message: 'Listing deleted successfully' });
         } else {
@@ -208,9 +195,7 @@ exports.deleteListing = (req, res) => {
     });
 };
 
-// --- UPDATED ADDITIONS BELOW (DO NOT REMOVE PREVIOUS CODES) ---
-
-// 12. UPDATE LISTING (Required by home.js)
+// 12. UPDATE LISTING
 exports.updateListing = (req, res) => {
     const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
     
@@ -227,7 +212,7 @@ exports.updateListing = (req, res) => {
     });
 };
 
-// 13. TOGGLE BOOKMARK (Required by home.js)
+// 13. TOGGLE BOOKMARK
 exports.toggleBookmark = (req, res) => {
     const { userId, listingId, action } = req.body;
 
@@ -246,7 +231,7 @@ exports.toggleBookmark = (req, res) => {
     }
 };
 
-// 14. GET BOOKMARKS (Required by home.js sync logic)
+// 14. GET BOOKMARKS
 exports.getBookmarks = (req, res) => {
     const userId = req.params.id;
     const sql = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
