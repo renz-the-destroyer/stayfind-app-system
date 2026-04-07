@@ -48,6 +48,28 @@ app.get('/api/get-bookmarks/:userId', (req, res) => {
     });
 });
 
+// --- NEW: EDIT/UPDATE PROPERTY ENDPOINT ---
+app.post('/api/update-listing', (req, res) => {
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
+
+    const query = `
+        UPDATE listings 
+        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=? 
+        WHERE id=? AND user_id=?
+    `;
+
+    db.query(query, [title, category, price, location, rooms, size, amenities, listingId, user_id], (err, result) => {
+        if (err) {
+            console.error("Update Error:", err);
+            return res.status(500).json(err);
+        }
+        if (result.affectedRows === 0) {
+            return res.status(403).json({ message: "Unauthorized or listing not found" });
+        }
+        res.json({ success: true, message: "Listing updated successfully!" });
+    });
+});
+
 // USE ROUTES
 // Dahil '/api' ang prefix mo, ang endpoints mo ay magiging:
 // https://your-app.onrender.com/api/add
