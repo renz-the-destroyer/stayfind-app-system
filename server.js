@@ -18,6 +18,36 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// --- NEW: BOOKMARK ENDPOINTS (Added directly to server.js for persistence) ---
+
+// 1. SAVE OR REMOVE BOOKMARK
+app.post('/api/toggle-bookmark', (req, res) => {
+    const { userId, listingId, action } = req.body;
+    
+    if (action === 'add') {
+        const query = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
+        db.query(query, [userId, listingId], (err, result) => {
+            if (err) return res.status(500).json(err);
+            res.json({ message: "Saved to database" });
+        });
+    } else {
+        const query = "DELETE FROM bookmarks WHERE user_id = ? AND listing_id = ?";
+        db.query(query, [userId, listingId], (err, result) => {
+            if (err) return res.status(500).json(err);
+            res.json({ message: "Removed from database" });
+        });
+    }
+});
+
+// 2. FETCH STORED BOOKMARKS ON LOGIN
+app.get('/api/get-bookmarks/:userId', (req, res) => {
+    const query = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
+    db.query(query, [req.params.userId], (err, results) => {
+        if (err) return res.status(500).json(err);
+        res.json(results);
+    });
+});
+
 // USE ROUTES
 // Dahil '/api' ang prefix mo, ang endpoints mo ay magiging:
 // https://your-app.onrender.com/api/add
