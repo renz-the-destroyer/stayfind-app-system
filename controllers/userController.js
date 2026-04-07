@@ -189,8 +189,55 @@ exports.deleteListing = (req, res) => {
         if (result.affectedRows > 0) {
             res.json({ success: true, message: 'Listing deleted successfully' });
         } else {
-            // This happens if the ID doesn't exist OR the user_id doesn't match
             res.status(403).json({ success: false, message: 'Unauthorized or Listing not found' });
         }
+    });
+};
+
+// --- UPDATED ADDITIONS BELOW (DO NOT REMOVE PREVIOUS CODES) ---
+
+// 12. UPDATE LISTING (Required by home.js)
+exports.updateListing = (req, res) => {
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
+    
+    const sql = `UPDATE listings SET title = ?, category = ?, price = ?, location = ?, rooms = ?, size = ?, amenities = ? 
+                 WHERE id = ? AND user_id = ?`;
+    
+    db.query(sql, [title, category, price, location, rooms, size, amenities, listingId, user_id], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (result.affectedRows > 0) {
+            res.json({ success: true, message: 'Listing updated successfully' });
+        } else {
+            res.status(403).json({ success: false, message: 'Unauthorized or listing not found' });
+        }
+    });
+};
+
+// 13. TOGGLE BOOKMARK (Required by home.js)
+exports.toggleBookmark = (req, res) => {
+    const { userId, listingId, action } = req.body;
+
+    if (action === 'add') {
+        const sql = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
+        db.query(sql, [userId, listingId], (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, message: 'Bookmarked' });
+        });
+    } else {
+        const sql = "DELETE FROM bookmarks WHERE user_id = ? AND listing_id = ?";
+        db.query(sql, [userId, listingId], (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ success: true, message: 'Removed' });
+        });
+    }
+};
+
+// 14. GET BOOKMARKS (Required by home.js sync logic)
+exports.getBookmarks = (req, res) => {
+    const userId = req.params.id;
+    const sql = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
+    db.query(sql, [userId], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
     });
 };
