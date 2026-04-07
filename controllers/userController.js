@@ -121,15 +121,27 @@ exports.updateProfile = (req, res) => {
     });
 };
 
-// 7. GET ALL LISTINGS
+// 7. GET ALL LISTINGS (Updated for Landlord Privacy Logic)
 exports.getAllListings = (req, res) => {
-    const sql = `
+    // We expect the frontend to pass role and user_id as query parameters
+    const { role, user_id } = req.query;
+
+    let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
-        JOIN users u ON l.user_id = u.id 
-        ORDER BY l.created_at DESC`;
+        JOIN users u ON l.user_id = u.id`;
+
+    let queryParams = [];
+
+    // If the user is a landlord, filter to only show their own listings
+    if (role === 'landlord' && user_id) {
+        sql += ` WHERE l.user_id = ?`;
+        queryParams.push(user_id);
+    }
+
+    sql += ` ORDER BY l.created_at DESC`;
         
-    db.query(sql, (err, rows) => {
+    db.query(sql, queryParams, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
@@ -153,14 +165,17 @@ exports.addListing = (req, res) => {
     });
 };
 
-// 9. ADD REVIEW
+// 9. ADD REVIEW (Updated to support Landlord Replies)
 exports.addReview = (req, res) => {
-    const { listing_id, user_id, user_name, comment, rating } = req.body;
-    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating) VALUES (?, ?, ?, ?, ?)`;
+    // added 'is_reply' and 'parent_id' for threaded responses if needed, or just is_reply
+    const { listing_id, user_id, user_name, comment, rating, is_reply } = req.body;
     
-    db.query(sql, [listing_id, user_id, user_name, comment, rating], (err, result) => {
+    // We include is_reply (1 for landlord reply, 0 for tenant review)
+    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply) VALUES (?, ?, ?, ?, ?, ?)`;
+    
+    db.query(sql, [listing_id, user_id, user_name, comment, rating || 0, is_reply || 0], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ success: true, message: 'Review submitted!' });
+        res.json({ success: true, message: is_reply ? 'Reply submitted!' : 'Review submitted!' });
     });
 };
 
@@ -176,10 +191,9 @@ exports.getReviews = (req, res) => {
 };
 
 // 11. DELETE LISTING (NEW)
-// Ensures only the owner can delete their own listing
 exports.deleteListing = (req, res) => {
     const listingId = req.params.id;
-    const { user_id } = req.body; // Sent from frontend to verify ownership
+    const { user_id } = req.body; 
 
     const sql = "DELETE FROM listings WHERE id = ? AND user_id = ?";
     
