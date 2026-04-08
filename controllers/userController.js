@@ -241,14 +241,18 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - ULTIMATE COMPATIBILITY VERSION
+// 15. SMART SEARCH - FUZZY KEYWORD VERSION
 exports.smartSearch = (req, res) => {
     const { message } = req.body;
-    if (!message) return res.status(400).json({ success: false, message: "Empty query" });
+    if (!message) return res.status(400).json({ success: false, message: "No query" });
 
     const query = message.toLowerCase().trim();
+    
+    // 1. Kunin ang lahat ng keywords (halimbawa: "apartment", "eu")
+    // Tinatanggal natin yung mga walang kwentang salita para di mag-error
+    const noise = ['near', 'an', 'the', 'with', 'sa', 'na', 'ng', 'mga'];
+    const keywords = query.split(/\s+/).filter(w => w.length > 1 && !noise.includes(w));
 
-    // 1. Setup SQL
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
@@ -256,36 +260,20 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // 2. Extract Numbers for Price and Rooms
-    const roomMatch = query.match(/(\d+)/); // Just find ANY number for rooms
-    const priceMatch = query.match(/(?:under|below|max|budget)\s*(\d+)/);
-
-    // If we find a number and the word "room" is nearby
-    if (query.includes("room") && roomMatch) {
-        sql += " AND l.rooms >= ?";
-        params.push(parseInt(roomMatch[1]));
-    }
-
-    // If we find a price limit
-    if (priceMatch) {
-        sql += " AND l.price <= ?";
-        params.push(parseFloat(priceMatch[1]));
-    }
-
-    // 3. Simple Keyword Split
-    // We split the sentence and search for each word individually
-    const words = query.split(/\s+/).filter(w => w.length > 1 && !['near', 'an', 'the', 'with', 'stay', 'find', 'looking'].includes(w));
-
-    if (words.length > 0) {
+    // 2. KEYWORD LOGIC
+    if (keywords.length > 0) {
         sql += " AND (";
-        const searchConditions = [];
-        words.forEach(word => {
-            // Search every column for every word
-            searchConditions.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
-            const term = `%${word}%`;
-            params.push(term, term, term, term);
+        let conditions = [];
+
+        keywords.forEach(word => {
+            // Hahanapin natin yung word sa KAHIT ANONG column
+            conditions.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
+            const wildCard = `%${word}%`;
+            params.push(wildCard, wildCard, wildCard, wildCard);
         });
-        sql += searchConditions.join(" OR "); 
+
+        // Gagamit tayo ng OR para kahit isa lang ang mag-match, lalabas ang result
+        sql += conditions.join(" OR "); 
         sql += ")";
     }
 
