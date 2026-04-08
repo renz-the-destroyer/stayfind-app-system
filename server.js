@@ -18,6 +18,33 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
+// --- NEW: SMART SEARCH ENDPOINT ---
+// This handles the AI-like filtering of listings based on chat input
+app.post('/api/smart-search', (req, res) => {
+    const { message } = req.body;
+    
+    // Simple logic to extract potential keywords from the user message
+    // In a real AI setup, you'd send 'message' to an AI API here.
+    // For now, we search the database for matches in title, location, or amenities.
+    const searchTerm = `%${message}%`;
+    const query = `
+        SELECT * FROM listings 
+        WHERE title LIKE ? 
+        OR location LIKE ? 
+        OR amenities LIKE ? 
+        OR category LIKE ?
+        LIMIT 5
+    `;
+
+    db.query(query, [searchTerm, searchTerm, searchTerm, searchTerm], (err, results) => {
+        if (err) {
+            console.error("Smart Search Error:", err);
+            return res.status(500).json({ error: "Search failed" });
+        }
+        res.json({ results });
+    });
+});
+
 // --- NEW: BOOKMARK ENDPOINTS (Added directly to server.js for persistence) ---
 
 // 1. SAVE OR REMOVE BOOKMARK
@@ -75,9 +102,6 @@ app.post('/api/update-listing', (req, res) => {
 });
 
 // USE ROUTES
-// Dahil '/api' ang prefix mo, ang endpoints mo ay magiging:
-// https://your-app.onrender.com/api/add
-// https://your-app.onrender.com/api/view
 app.use('/api', routes);
 
 // Global error handling middleware
