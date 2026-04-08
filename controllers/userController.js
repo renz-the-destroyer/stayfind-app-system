@@ -241,16 +241,16 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH (Improved Natural Language Processing)
+// 15. SMART SEARCH (Final Optimization for Location & Keywords)
 exports.smartSearch = (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, message: "No search query provided" });
 
     const query = message.toLowerCase();
 
-    // 1. Extract specific filters
+    // 1. EXTRACT FILTERS
     const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/);
-    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget)\s*(\d+)/);
+    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/);
 
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
@@ -259,42 +259,43 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // 2. Apply strict filters if found
+    // 2. ROOMS & PRICE
     if (roomMatch) {
         sql += " AND l.rooms >= ?";
         params.push(roomMatch[1]);
     }
-
     if (priceMatch) {
         sql += " AND l.price <= ?";
         params.push(priceMatch[2]);
     }
 
-    // 3. Category Detection (Added 'condo')
+    // 3. CATEGORY (Mapping 'condo' to 'Apartment')
     if (query.includes("house") || query.includes("bahay")) {
         sql += " AND l.category = 'House'";
-    } else if (query.includes("apartment") || query.includes("condo") || query.includes("unit")) {
-        sql += " AND l.category = 'Apartment'"; 
+    } else if (query.includes("apartment") || query.includes("condo") || query.includes("unit") || query.includes("room")) {
+        sql += " AND l.category = 'Apartment'";
     }
 
-    // 4. SMART KEYWORD SEARCH (The Fix)
-    // List of "stop words" to ignore so they don't break the search
-    const stopWords = ['near', 'with', 'have', 'find', 'looking', 'around', 'beside', 'available'];
-    
-    const keywords = query.split(' ')
-        .filter(w => w.length > 1) // Ignore single letters
-        .filter(w => !stopWords.includes(w)) // Ignore "near", "with", etc.
-        // Ignore words already handled by room/price/category logic
-        .filter(w => !['rooms', 'room', 'house', 'bahay', 'apartment', 'condo', 'under', 'below'].includes(w));
+    // 4. IMPROVED KEYWORD LOGIC
+    // We remove the filters we already caught so they don't interfere with location search
+    let cleanQuery = query
+        .replace(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/g, '')
+        .replace(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/g, '')
+        .replace(/(house|bahay|apartment|condo|with|near|finding|look|stay|find)/g, '')
+        .trim();
+
+    // Split into individual words (e.g., "eu")
+    const keywords = cleanQuery.split(/\s+/).filter(w => w.length >= 2);
 
     if (keywords.length > 0) {
+        // We use 'AND' for the overall category/price, but 'OR' for these specific keywords
         sql += " AND (";
         const keywordConditions = keywords.map(() => {
             return "(l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)";
         });
-        sql += keywordConditions.join(" OR "); // Use OR so "near" doesn't kill the result
+        sql += keywordConditions.join(" OR ");
         sql += ")";
-        
+
         keywords.forEach(word => {
             const wildCard = `%${word}%`;
             params.push(wildCard, wildCard, wildCard);
