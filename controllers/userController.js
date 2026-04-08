@@ -241,15 +241,19 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - UNIVERSAL SEARCH VERSION
+// 15. SMART SEARCH - HIGH TOLERANCE VERSION (OR LOGIC)
 exports.smartSearch = (req, res) => {
-    const userQuery = req.body.message || "";
+    // Kinukuha ang query kahit 'message' o 'query' ang gamitin ng frontend
+    const userQuery = req.body.message || req.body.query || "";
     
     if (!userQuery.trim()) {
         return res.json({ success: true, results: [] });
     }
 
-    const words = userQuery.toLowerCase().split(/\s+/).filter(w => w.length > 1);
+    // Kinukuha ang mga salita at tinatanggal ang mga fillers
+    const words = userQuery.toLowerCase().split(/\s+/).filter(w => 
+        w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
+    );
 
     // Basic SQL to get everything joined with user info
     let sql = `
@@ -261,29 +265,25 @@ exports.smartSearch = (req, res) => {
     let conditions = [];
     let params = [];
 
-    // For every word the user types (e.g., "apartment", "eu")
-    words.forEach(word => {
-        // Ignore filler words to prevent no matches
-        if (['near', 'with', 'the', 'and', 'for', 'sa', 'na'].includes(word)) return;
+    if (words.length > 0) {
+        words.forEach(word => {
+            // Check if this word exists in ANY of these columns
+            let searchPart = `(
+                LOWER(l.title) LIKE ? OR 
+                LOWER(l.location) LIKE ? OR 
+                LOWER(l.category) LIKE ? OR 
+                LOWER(l.amenities) LIKE ? OR
+                l.rooms LIKE ?
+            )`;
+            conditions.push(searchPart);
+            
+            const term = `%${word}%`;
+            params.push(term, term, term, term, term);
+        });
 
-        // Check if this word exists in ANY of these columns
-        searchPart = `(
-            LOWER(l.title) LIKE ? OR 
-            LOWER(l.location) LIKE ? OR 
-            LOWER(l.category) LIKE ? OR 
-            LOWER(l.amenities) LIKE ? OR
-            l.rooms LIKE ?
-        )`;
-        conditions.push(searchPart);
-        
-        const term = `%${word}%`;
-        params.push(term, term, term, term, term);
-    });
-
-    // If we have valid words, join them with AND
-    // This means: Find a row that has word1 SOMEWHERE and word2 SOMEWHERE
-    if (conditions.length > 0) {
-        sql += conditions.join(" AND ");
+        // UPDATED: Gagamit tayo ng OR para hindi mag-conflict ang magkaibang keywords
+        // This ensures "apartment" in category and "eu" in location both trigger the result.
+        sql += conditions.join(" OR ");
     } else {
         sql += "1=1"; // Fallback if only filler words were typed
     }
@@ -292,6 +292,7 @@ exports.smartSearch = (req, res) => {
 
     db.query(sql, params, (err, rows) => {
         if (err) {
+            console.error("Database Error:", err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
         res.json({ success: true, results: rows });
