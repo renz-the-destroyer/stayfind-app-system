@@ -241,7 +241,7 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - THE ULTIMATE FUZZY VERSION
+// 15. SMART SEARCH - THE ULTIMATE INDEPENDENT WORD VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || req.body.query || "";
     
@@ -249,7 +249,7 @@ exports.smartSearch = (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
-    // Linisin ang input at kunin ang mga keywords
+    // Clean input and extract keywords
     const words = userQuery.toLowerCase().trim().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
@@ -264,7 +264,7 @@ exports.smartSearch = (req, res) => {
     let params = [];
 
     if (words.length > 0) {
-        // Imbes na isang CONCAT, gagawa tayo ng hiwalay na check para sa BAWAT salita
+        // We create an independent check for EVERY word entered
         words.forEach(word => {
             conditions.push(`(
                 LOWER(l.title) LIKE ? OR 
@@ -276,8 +276,8 @@ exports.smartSearch = (req, res) => {
             params.push(term, term, term, term);
         });
         
-        // Gagamit tayo ng AND sa pagitan ng keywords
-        // Ibig sabihin: (Dapat mahanap ang Word1 kahit saan) AND (Dapat mahanap ang Word2 kahit saan)
+        // Joining with AND ensures that EVERY word (e.g., 'apartment' AND 'eu') 
+        // must be found SOMEWHERE in the row, even in different columns.
         sql += conditions.join(" AND ");
     } else {
         sql += "1=1"; 
@@ -291,8 +291,7 @@ exports.smartSearch = (req, res) => {
         }
         res.json({ 
             success: true, 
-            results: rows,
-            debug: { query: userQuery, words_detected: words } 
+            results: rows
         });
     });
 };
