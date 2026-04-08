@@ -241,7 +241,7 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - THE ULTIMATE INDEPENDENT WORD VERSION
+// 15. SMART SEARCH - JAVASCRIPT FILTERING VERSION (Bulletproof)
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || req.body.query || "";
     
@@ -249,49 +249,42 @@ exports.smartSearch = (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
-    // Clean input and extract keywords
-    const words = userQuery.toLowerCase().trim().split(/\s+/).filter(w => 
+    // Prepare keywords (e.g., ["apartment", "eu"])
+    const keywords = userQuery.toLowerCase().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
 
-    let sql = `
+    // Get ALL listings first, then we filter them in JS
+    const sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
-        LEFT JOIN users u ON l.user_id = u.id 
-        WHERE `;
-    
-    let conditions = [];
-    let params = [];
+        LEFT JOIN users u ON l.user_id = u.id
+    `;
 
-    if (words.length > 0) {
-        // We create an independent check for EVERY word entered
-        words.forEach(word => {
-            conditions.push(`(
-                LOWER(l.title) LIKE ? OR 
-                LOWER(l.location) LIKE ? OR 
-                LOWER(l.category) LIKE ? OR 
-                LOWER(l.amenities) LIKE ?
-            )`);
-            const term = `%${word}%`;
-            params.push(term, term, term, term);
-        });
-        
-        // Joining with AND ensures that EVERY word (e.g., 'apartment' AND 'eu') 
-        // must be found SOMEWHERE in the row, even in different columns.
-        sql += conditions.join(" AND ");
-    } else {
-        sql += "1=1"; 
-    }
-
-    sql += " ORDER BY l.id DESC";
-
-    db.query(sql, params, (err, rows) => {
+    db.query(sql, (err, rows) => {
         if (err) {
             return res.status(500).json({ success: false, error: err.message });
         }
+
+        // Filter the rows using JavaScript logic
+        const filteredResults = rows.filter(row => {
+            // Combine all row data into one searchable string
+            const rowContent = `
+                ${row.title} 
+                ${row.location} 
+                ${row.category} 
+                ${row.amenities}
+            `.toLowerCase();
+
+            // Check if EVERY keyword exists somewhere in the rowContent
+            return keywords.every(word => rowContent.includes(word));
+        });
+
         res.json({ 
             success: true, 
-            results: rows
+            results: filteredResults,
+            debug_count: rows.length,
+            keywords_used: keywords
         });
     });
 };
