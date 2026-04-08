@@ -50,4 +50,8 @@ router.post('/toggle-bookmark', userController.toggleBookmark);
 // Fetch saved bookmarks for sync
 router.get('/get-bookmarks/:id', userController.getBookmarks);
 
+// --- 9. SMART SEARCH SYSTEM (NEW) ---
+// Handles natural language like "3 rooms" or "house under 5000"
+router.post('/smart-search', userController.smartSearch);
+
 module.exports = router;
