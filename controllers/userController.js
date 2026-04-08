@@ -241,34 +241,39 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - THE "VIRTUAL TEXT" VERSION
+// 15. userController.js - Updated Smart Search with Role Security
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
-    // Break "apartment eu" into ["apartment", "eu"]
+    // Access user info from the request (sent from frontend)
+    const { role, id: userId } = req.body.userContext || {}; 
+    
     const keywords = userQuery.toLowerCase().trim().split(/\s+/).filter(w => w.length > 1);
 
     if (keywords.length === 0) return res.json({ success: true, results: [] });
 
+    // Step 1: Base SQL Query
     let sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact 
+        SELECT l.*, u.full_name AS landlord_name 
         FROM listings l 
-        LEFT JOIN users u ON l.user_id = u.id 
-        WHERE `;
-    
-    let conditions = [];
-    let params = [];
+        LEFT JOIN users u ON l.user_id = u.id
+    `;
 
-    keywords.forEach(word => {
-        // This scans Title, Location, Category, and Amenities for EACH word
-        conditions.push(`CONCAT_WS(' ', LOWER(l.title), LOWER(l.location), LOWER(l.category), LOWER(l.amenities)) LIKE ?`);
-        params.push(`%${word}%`);
-    });
+    // Step 2: Role Filtering logic
+    // If landlord, they only see their own items. If tenant, they see all.
+    let roleCondition = (role === 'landlord') ? `l.user_id = ${db.escape(userId)}` : `1=1`;
 
-    // Use AND so that BOTH "apartment" and "eu" must be found SOMEWHERE in the listing
-    sql += conditions.join(" AND ");
-
-    db.query(sql, params, (err, rows) => {
+    db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, results: rows });
+
+        const finalResults = rows.filter(row => {
+            // Role Check: Ensure landlords only see their own listings in search
+            const isOwner = (role === 'landlord') ? String(row.user_id) === String(userId) : true;
+            if (!isOwner) return false;
+
+            const allTextInRow = `${row.title} ${row.location} ${row.category} ${row.amenities}`.toLowerCase();
+            return keywords.every(word => allTextInRow.includes(word));
+        });
+
+        res.json({ success: true, results: finalResults });
     });
 };
