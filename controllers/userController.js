@@ -241,14 +241,14 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH (Chromebook-Optimized Final Version)
+// 15. SMART SEARCH - ULTIMATE COMPATIBILITY VERSION
 exports.smartSearch = (req, res) => {
     const { message } = req.body;
-    if (!message) return res.status(400).json({ success: false, message: "No search query provided" });
+    if (!message) return res.status(400).json({ success: false, message: "Empty query" });
 
     const query = message.toLowerCase().trim();
 
-    // 1. Setup Base SQL with lower-case handling
+    // 1. Setup SQL
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
@@ -256,53 +256,43 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // 2. Extract Numbers (Rooms/Price)
-    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/);
-    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/);
+    // 2. Extract Numbers for Price and Rooms
+    const roomMatch = query.match(/(\d+)/); // Just find ANY number for rooms
+    const priceMatch = query.match(/(?:under|below|max|budget)\s*(\d+)/);
 
-    if (roomMatch) {
+    // If we find a number and the word "room" is nearby
+    if (query.includes("room") && roomMatch) {
         sql += " AND l.rooms >= ?";
         params.push(parseInt(roomMatch[1]));
     }
+
+    // If we find a price limit
     if (priceMatch) {
         sql += " AND l.price <= ?";
-        params.push(parseFloat(priceMatch[2]));
+        params.push(parseFloat(priceMatch[1]));
     }
 
-    // 3. Smart Keyword Parsing
-    // We ignore "noise" words that break searches
-    const noise = ['near', 'an', 'the', 'with', 'at', 'sa', 'na', 'looking', 'for', 'find', 'in'];
-    const words = query.split(/\s+/).filter(w => w.length > 1 && !noise.includes(w));
+    // 3. Simple Keyword Split
+    // We split the sentence and search for each word individually
+    const words = query.split(/\s+/).filter(w => w.length > 1 && !['near', 'an', 'the', 'with', 'stay', 'find', 'looking'].includes(w));
 
     if (words.length > 0) {
         sql += " AND (";
-        const conditions = [];
-
+        const searchConditions = [];
         words.forEach(word => {
-            // If it's a category word, search the category column specifically
-            if (['house', 'bahay'].includes(word)) {
-                conditions.push("LOWER(l.category) = 'house'");
-            } else if (['apartment', 'condo', 'unit', 'room'].includes(word)) {
-                conditions.push("LOWER(l.category) = 'apartment'");
-            } else {
-                // Otherwise, search location, title, and amenities
-                conditions.push("(LOWER(l.title) LIKE ? OR LOWER(l.location) LIKE ? OR LOWER(l.amenities) LIKE ?)");
-                const wildCard = `%${word}%`;
-                params.push(wildCard, wildCard, wildCard);
-            }
+            // Search every column for every word
+            searchConditions.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
+            const term = `%${word}%`;
+            params.push(term, term, term, term);
         });
-
-        sql += conditions.join(" OR "); // Using OR ensures "near" or "an" doesn't kill the result
+        sql += searchConditions.join(" OR "); 
         sql += ")";
     }
 
     sql += " ORDER BY l.created_at DESC";
 
     db.query(sql, params, (err, rows) => {
-        if (err) {
-            // On Chromebook, we send the error to the browser console so you can see it
-            return res.status(500).json({ success: false, error: err.message, debugQuery: sql });
-        }
+        if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, results: rows });
     });
 };
