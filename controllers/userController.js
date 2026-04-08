@@ -241,55 +241,34 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - THE "ZERO-LOGIC" FINAL VERSION
+// 15. SMART SEARCH - THE "VIRTUAL TEXT" VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
-    // Clean up the words from the user
-    const keywords = userQuery.toLowerCase().trim().split(/\s+/).filter(w => w.length > 0);
+    // Break "apartment eu" into ["apartment", "eu"]
+    const keywords = userQuery.toLowerCase().trim().split(/\s+/).filter(w => w.length > 1);
 
-    // Get everything from the database
-    const sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
+    if (keywords.length === 0) return res.json({ success: true, results: [] });
+
+    let sql = `
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact 
         FROM listings l 
-        LEFT JOIN users u ON l.user_id = u.id
-    `;
+        LEFT JOIN users u ON l.user_id = u.id 
+        WHERE `;
+    
+    let conditions = [];
+    let params = [];
 
-    db.query(sql, (err, rows) => {
+    keywords.forEach(word => {
+        // This scans Title, Location, Category, and Amenities for EACH word
+        conditions.push(`CONCAT_WS(' ', LOWER(l.title), LOWER(l.location), LOWER(l.category), LOWER(l.amenities)) LIKE ?`);
+        params.push(`%${word}%`);
+    });
+
+    // Use AND so that BOTH "apartment" and "eu" must be found SOMEWHERE in the listing
+    sql += conditions.join(" AND ");
+
+    db.query(sql, params, (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
-
-        // If no keywords, return nothing
-        if (keywords.length === 0) return res.json({ success: true, results: [] });
-
-        // We manually build the results list
-        let finalMatches = [];
-
-        rows.forEach(row => {
-            // Combine everything into one text block per row
-            const searchData = `${row.title} ${row.location} ${row.category} ${row.amenities}`.toLowerCase();
-            
-            // Check if every keyword is inside that text block
-            let matchCount = 0;
-            keywords.forEach(word => {
-                if (searchData.includes(word)) {
-                    matchCount++;
-                }
-            });
-
-            // If we found ALL the keywords in this row, add it to our list
-            if (matchCount === keywords.length) {
-                finalMatches.push(row);
-            }
-        });
-
-        // Send back the list we built
-        res.json({ 
-            success: true, 
-            results: finalMatches,
-            debug_info: {
-                query_words: keywords,
-                total_rows_checked: rows.length,
-                matches_found: finalMatches.length
-            }
-        });
+        res.json({ success: true, results: rows });
     });
 };
