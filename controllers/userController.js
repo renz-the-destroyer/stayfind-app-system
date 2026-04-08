@@ -241,7 +241,7 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - DEBUGGING VERSION
+// 15. SMART SEARCH - POWER CONCAT VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || req.body.query || "";
     
@@ -249,6 +249,7 @@ exports.smartSearch = (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
+    // Split words and filter out common "noise" words
     const words = userQuery.toLowerCase().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
@@ -256,7 +257,7 @@ exports.smartSearch = (req, res) => {
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
-        JOIN users u ON l.user_id = u.id 
+        LEFT JOIN users u ON l.user_id = u.id 
         WHERE `;
     
     let conditions = [];
@@ -264,36 +265,31 @@ exports.smartSearch = (req, res) => {
 
     if (words.length > 0) {
         words.forEach(word => {
-            let searchPart = `(
-                LOWER(l.title) LIKE ? OR 
-                LOWER(l.location) LIKE ? OR 
-                LOWER(l.category) LIKE ? OR 
-                LOWER(l.amenities) LIKE ?
-            )`;
-            conditions.push(searchPart);
-            
-            const term = `%${word}%`;
-            params.push(term, term, term, term);
+            // We combine all searchable columns into one string for the word to hide in
+            // This is the most 'fuzzy' way to search in MySQL
+            conditions.push("CONCAT_WS(' ', LOWER(l.title), LOWER(l.location), LOWER(l.category), LOWER(l.amenities)) LIKE ?");
+            params.push(`%${word}%`);
         });
 
+        // Use OR so 'apartment' OR 'eu' triggers a match
         sql += conditions.join(" OR ");
     } else {
         sql += "1=1"; 
     }
 
-    sql += " ORDER BY l.created_at DESC";
+    sql += " ORDER BY l.id DESC";
 
     db.query(sql, params, (err, rows) => {
         if (err) {
+            console.error("SQL Error:", err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
-        // WE ARE NOW SENDING THE SQL AND PARAMS BACK TO YOUR CHROMEBOOK
+        
+        // This will print the results and the words detected in your Chrome console
         res.json({ 
             success: true, 
-            results: rows, 
-            debug_sql: sql, 
-            debug_params: params,
-            debug_words_detected: words
+            results: rows,
+            debug_words: words 
         });
     });
 };
