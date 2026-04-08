@@ -241,17 +241,19 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - FUZZY KEYWORD VERSION
+// 15. SMART SEARCH - EXTRA SAFE VERSION
 exports.smartSearch = (req, res) => {
-    const { message } = req.body;
-    if (!message) return res.status(400).json({ success: false, message: "No query" });
-
-    const query = message.toLowerCase().trim();
+    // Kinukuha ang query kahit 'message' o 'query' ang gamitin ng frontend
+    const userQuery = req.body.message || req.body.query || "";
     
-    // 1. Kunin ang lahat ng keywords (halimbawa: "apartment", "eu")
-    // Tinatanggal natin yung mga walang kwentang salita para di mag-error
-    const noise = ['near', 'an', 'the', 'with', 'sa', 'na', 'ng', 'mga'];
-    const keywords = query.split(/\s+/).filter(w => w.length > 1 && !noise.includes(w));
+    if (!userQuery) {
+        return res.status(200).json({ success: true, results: [] });
+    }
+
+    const cleanQuery = userQuery.toLowerCase().trim();
+    
+    // Split keywords (halimbawa: ["apartment", "eu"])
+    const words = cleanQuery.split(/\s+/).filter(w => w.length > 1 && !['near', 'sa', 'na', 'the', 'an'].includes(w));
 
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
@@ -260,27 +262,31 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // 2. KEYWORD LOGIC
-    if (keywords.length > 0) {
+    if (words.length > 0) {
         sql += " AND (";
-        let conditions = [];
-
-        keywords.forEach(word => {
-            // Hahanapin natin yung word sa KAHIT ANONG column
-            conditions.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
-            const wildCard = `%${word}%`;
-            params.push(wildCard, wildCard, wildCard, wildCard);
+        let searchParts = [];
+        
+        words.forEach(word => {
+            // Ito ang sikreto: chine-check natin lahat ng column para sa BAWAT salita
+            searchParts.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
+            const value = `%${word}%`;
+            params.push(value, value, value, value);
         });
 
-        // Gagamit tayo ng OR para kahit isa lang ang mag-match, lalabas ang result
-        sql += conditions.join(" OR "); 
+        // Gagamit tayo ng AND sa pagitan ng keywords pero OR sa columns
+        // Para kung nag-type ka ng "apartment eu", kailangan mahanap niya ang "apartment" AT "eu" kahit saan silang column
+        sql += searchParts.join(" AND "); 
         sql += ")";
     }
 
     sql += " ORDER BY l.created_at DESC";
 
+    // Debugging: Makikita mo ito sa logs kung bakit ayaw (kung may access ka sa logs)
     db.query(sql, params, (err, rows) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (err) {
+            console.error("Database Error:", err.message);
+            return res.status(500).json({ success: false, error: err.message });
+        }
         res.json({ success: true, results: rows });
     });
 };
