@@ -241,17 +241,14 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH (v4 - Ultra Flexible)
+// 15. SMART SEARCH (Fixed Category + Location Conflict)
 exports.smartSearch = (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, message: "No search query provided" });
 
     const query = message.toLowerCase();
 
-    // 1. Extract Numbers (Rooms/Price)
-    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/);
-    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/);
-
+    // 1. Setup Base SQL
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
@@ -259,7 +256,10 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // 2. Apply Strict Numeric Filters
+    // 2. Extract Numbers (Rooms/Price)
+    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/);
+    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/);
+
     if (roomMatch) {
         sql += " AND l.rooms >= ?";
         params.push(roomMatch[1]);
@@ -269,28 +269,35 @@ exports.smartSearch = (req, res) => {
         params.push(priceMatch[2]);
     }
 
-    // 3. Smart Keyword Parsing
-    // We remove the numeric parts and filler words
-    let cleanQuery = query
-        .replace(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/g, '')
-        .replace(/(under|below|sa|na|less than|max|budget|limit)\s*(\d+)/g, '')
-        .replace(/(near|finding|look|stay|find|with|around|beside)/g, '')
-        .trim();
+    // 3. Extract Keywords & Category
+    // We remove "stop words" that usually cause 'No Matches' errors
+    const stopWords = ['near', 'an', 'the', 'with', 'at', 'sa', 'na', 'looking', 'for', 'find'];
+    
+    // Split the query into words and filter out the noise
+    const allWords = query.split(/\s+/).filter(w => w.length > 1 && !stopWords.includes(w));
 
-    const keywords = cleanQuery.split(/\s+/).filter(w => w.length >= 2);
+    // Check if any word refers to a category
+    const isHouse = allWords.some(w => ['house', 'bahay'].includes(w));
+    const isApartment = allWords.some(w => ['apartment', 'condo', 'unit', 'room'].includes(w));
 
-    if (keywords.length > 0) {
+    if (isHouse) {
+        sql += " AND l.category = 'House'";
+    } else if (isApartment) {
+        sql += " AND l.category = 'Apartment'";
+    }
+
+    // 4. Search remaining words (like "eu") in Title, Location, or Amenities
+    const searchTerms = allWords.filter(w => !['house', 'bahay', 'apartment', 'condo', 'unit', 'room'].includes(w));
+
+    if (searchTerms.length > 0) {
         sql += " AND (";
-        const keywordConditions = keywords.map((word) => {
-            // We search category, title, location, AND amenities for EVERY word
-            return "(l.category LIKE ? OR l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)";
-        });
-        sql += keywordConditions.join(" AND "); // Every keyword must be relevant somewhere
+        const conditions = searchTerms.map(() => "(l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)");
+        sql += conditions.join(" OR "); 
         sql += ")";
 
-        keywords.forEach(word => {
+        searchTerms.forEach(word => {
             const wildCard = `%${word}%`;
-            params.push(wildCard, wildCard, wildCard, wildCard);
+            params.push(wildCard, wildCard, wildCard);
         });
     }
 
@@ -301,7 +308,6 @@ exports.smartSearch = (req, res) => {
             console.error("Search SQL Error:", err);
             return res.status(500).json({ success: false, error: err.message });
         }
-        // IMPORTANT: We send the array directly or in a results object
         res.json({ success: true, results: rows });
     });
 };
