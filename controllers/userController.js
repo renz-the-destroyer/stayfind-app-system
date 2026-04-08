@@ -241,43 +241,55 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - DIAGNOSTIC VERSION
+// 15. SMART SEARCH - THE "ZERO-LOGIC" FINAL VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
-    const keywords = userQuery.toLowerCase().split(/\s+/).filter(w => w.length > 0);
+    // Clean up the words from the user
+    const keywords = userQuery.toLowerCase().trim().split(/\s+/).filter(w => w.length > 0);
 
-    // Step 1: Get EVERYTHING so we can see what's actually in the DB
+    // Get everything from the database
     const sql = `
-        SELECT l.id, l.title, l.location, l.category, l.amenities 
-        FROM listings l
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
+        FROM listings l 
+        LEFT JOIN users u ON l.user_id = u.id
     `;
 
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
 
-        // Step 2: Create a "Match Map" to see WHY it's failing
-        const diagnosticResults = rows.map(row => {
-            const rowText = `${row.title} ${row.location} ${row.category}`.toLowerCase();
-            const analysis = keywords.map(word => ({
-                word: word,
-                found: rowText.includes(word)
-            }));
+        // If no keywords, return nothing
+        if (keywords.length === 0) return res.json({ success: true, results: [] });
 
-            return {
-                id: row.id,
-                text_checked: rowText,
-                analysis: analysis,
-                is_full_match: analysis.every(a => a.found)
-            };
+        // We manually build the results list
+        let finalMatches = [];
+
+        rows.forEach(row => {
+            // Combine everything into one text block per row
+            const searchData = `${row.title} ${row.location} ${row.category} ${row.amenities}`.toLowerCase();
+            
+            // Check if every keyword is inside that text block
+            let matchCount = 0;
+            keywords.forEach(word => {
+                if (searchData.includes(word)) {
+                    matchCount++;
+                }
+            });
+
+            // If we found ALL the keywords in this row, add it to our list
+            if (matchCount === keywords.length) {
+                finalMatches.push(row);
+            }
         });
 
-        // Step 3: Final Filter
-        const finalResults = rows.filter((r, index) => diagnosticResults[index].is_full_match);
-
+        // Send back the list we built
         res.json({ 
             success: true, 
-            results: finalResults,
-            diagnostic_report: diagnosticResults // THIS WILL TELL US THE TRUTH
+            results: finalMatches,
+            debug_info: {
+                query_words: keywords,
+                total_rows_checked: rows.length,
+                matches_found: finalMatches.length
+            }
         });
     });
 };
