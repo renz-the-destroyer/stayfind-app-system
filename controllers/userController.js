@@ -241,18 +241,17 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH (Natural Language Processing)
+// 15. SMART SEARCH (Improved Natural Language Processing)
 exports.smartSearch = (req, res) => {
     const { message } = req.body;
     if (!message) return res.status(400).json({ success: false, message: "No search query provided" });
 
     const query = message.toLowerCase();
 
-    // Regex to extract numbers for rooms and price
-    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds)/);
-    const priceMatch = query.match(/(under|below|sa|na|less than|max)\s*(\d+)/);
+    // 1. Extract specific filters
+    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds|unit)/);
+    const priceMatch = query.match(/(under|below|sa|na|less than|max|budget)\s*(\d+)/);
 
-    // Initial SQL setup
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
@@ -260,40 +259,55 @@ exports.smartSearch = (req, res) => {
         WHERE 1=1`;
     let params = [];
 
-    // Logic for Rooms
+    // 2. Apply strict filters if found
     if (roomMatch) {
         sql += " AND l.rooms >= ?";
         params.push(roomMatch[1]);
     }
 
-    // Logic for Price
     if (priceMatch) {
         sql += " AND l.price <= ?";
         params.push(priceMatch[2]);
     }
 
-    // Logic for Category
+    // 3. Category Detection (Added 'condo')
     if (query.includes("house") || query.includes("bahay")) {
         sql += " AND l.category = 'House'";
-    } else if (query.includes("apartment")) {
-        sql += " AND l.category = 'Apartment'";
+    } else if (query.includes("apartment") || query.includes("condo") || query.includes("unit")) {
+        sql += " AND l.category = 'Apartment'"; 
     }
 
-    // Logic for general keywords (Location, Title, Amenities)
-    const keywords = query.split(' ').filter(w => w.length > 3);
-    keywords.forEach(word => {
-        // Skip common words we already handled
-        if (['rooms', 'house', 'apartment', 'under', 'below', 'bedroom'].includes(word)) return;
+    // 4. SMART KEYWORD SEARCH (The Fix)
+    // List of "stop words" to ignore so they don't break the search
+    const stopWords = ['near', 'with', 'have', 'find', 'looking', 'around', 'beside', 'available'];
+    
+    const keywords = query.split(' ')
+        .filter(w => w.length > 1) // Ignore single letters
+        .filter(w => !stopWords.includes(w)) // Ignore "near", "with", etc.
+        // Ignore words already handled by room/price/category logic
+        .filter(w => !['rooms', 'room', 'house', 'bahay', 'apartment', 'condo', 'under', 'below'].includes(w));
+
+    if (keywords.length > 0) {
+        sql += " AND (";
+        const keywordConditions = keywords.map(() => {
+            return "(l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)";
+        });
+        sql += keywordConditions.join(" OR "); // Use OR so "near" doesn't kill the result
+        sql += ")";
         
-        sql += " AND (l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)";
-        const wildCard = `%${word}%`;
-        params.push(wildCard, wildCard, wildCard);
-    });
+        keywords.forEach(word => {
+            const wildCard = `%${word}%`;
+            params.push(wildCard, wildCard, wildCard);
+        });
+    }
 
     sql += " ORDER BY l.created_at DESC";
 
     db.query(sql, params, (err, rows) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (err) {
+            console.error("Search SQL Error:", err);
+            return res.status(500).json({ success: false, error: err.message });
+        }
         res.json({ success: true, results: rows });
     });
 };
