@@ -241,7 +241,7 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - POWER CONCAT VERSION
+// 15. SMART SEARCH - THE "101% GUARANTEE" VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || req.body.query || "";
     
@@ -249,7 +249,7 @@ exports.smartSearch = (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
-    // Split words and filter out common "noise" words
+    // Process keywords
     const words = userQuery.toLowerCase().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
@@ -264,15 +264,13 @@ exports.smartSearch = (req, res) => {
     let params = [];
 
     if (words.length > 0) {
+        // This creates a requirement for EVERY word to be found SOMEWHERE in the listing
         words.forEach(word => {
-            // We combine all searchable columns into one string for the word to hide in
-            // This is the most 'fuzzy' way to search in MySQL
             conditions.push("CONCAT_WS(' ', LOWER(l.title), LOWER(l.location), LOWER(l.category), LOWER(l.amenities)) LIKE ?");
             params.push(`%${word}%`);
         });
-
-        // Use OR so 'apartment' OR 'eu' triggers a match
-        sql += conditions.join(" OR ");
+        // Use AND here so that BOTH "apartment" AND "eu" must exist
+        sql += conditions.join(" AND ");
     } else {
         sql += "1=1"; 
     }
@@ -281,15 +279,8 @@ exports.smartSearch = (req, res) => {
 
     db.query(sql, params, (err, rows) => {
         if (err) {
-            console.error("SQL Error:", err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
-        
-        // This will print the results and the words detected in your Chrome console
-        res.json({ 
-            success: true, 
-            results: rows,
-            debug_words: words 
-        });
+        res.json({ success: true, results: rows });
     });
 };
