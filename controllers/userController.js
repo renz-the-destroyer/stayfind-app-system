@@ -241,7 +241,7 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - THE "101% GUARANTEE" VERSION
+// 15. SMART SEARCH - THE ULTIMATE FUZZY VERSION
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || req.body.query || "";
     
@@ -249,8 +249,8 @@ exports.smartSearch = (req, res) => {
         return res.json({ success: true, results: [] });
     }
 
-    // Process keywords
-    const words = userQuery.toLowerCase().split(/\s+/).filter(w => 
+    // Linisin ang input at kunin ang mga keywords
+    const words = userQuery.toLowerCase().trim().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
 
@@ -264,12 +264,20 @@ exports.smartSearch = (req, res) => {
     let params = [];
 
     if (words.length > 0) {
-        // This creates a requirement for EVERY word to be found SOMEWHERE in the listing
+        // Imbes na isang CONCAT, gagawa tayo ng hiwalay na check para sa BAWAT salita
         words.forEach(word => {
-            conditions.push("CONCAT_WS(' ', LOWER(l.title), LOWER(l.location), LOWER(l.category), LOWER(l.amenities)) LIKE ?");
-            params.push(`%${word}%`);
+            conditions.push(`(
+                LOWER(l.title) LIKE ? OR 
+                LOWER(l.location) LIKE ? OR 
+                LOWER(l.category) LIKE ? OR 
+                LOWER(l.amenities) LIKE ?
+            )`);
+            const term = `%${word}%`;
+            params.push(term, term, term, term);
         });
-        // Use AND here so that BOTH "apartment" AND "eu" must exist
+        
+        // Gagamit tayo ng AND sa pagitan ng keywords
+        // Ibig sabihin: (Dapat mahanap ang Word1 kahit saan) AND (Dapat mahanap ang Word2 kahit saan)
         sql += conditions.join(" AND ");
     } else {
         sql += "1=1"; 
@@ -281,6 +289,10 @@ exports.smartSearch = (req, res) => {
         if (err) {
             return res.status(500).json({ success: false, error: err.message });
         }
-        res.json({ success: true, results: rows });
+        res.json({ 
+            success: true, 
+            results: rows,
+            debug: { query: userQuery, words_detected: words } 
+        });
     });
 };
