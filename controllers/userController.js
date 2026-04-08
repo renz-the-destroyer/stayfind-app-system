@@ -241,50 +241,43 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - JAVASCRIPT FILTERING VERSION (Bulletproof)
+// 15. SMART SEARCH - DIAGNOSTIC VERSION
 exports.smartSearch = (req, res) => {
-    const userQuery = req.body.message || req.body.query || "";
-    
-    if (!userQuery.trim()) {
-        return res.json({ success: true, results: [] });
-    }
+    const userQuery = req.body.message || "";
+    const keywords = userQuery.toLowerCase().split(/\s+/).filter(w => w.length > 0);
 
-    // Prepare keywords (e.g., ["apartment", "eu"])
-    const keywords = userQuery.toLowerCase().split(/\s+/).filter(w => 
-        w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
-    );
-
-    // Get ALL listings first, then we filter them in JS
+    // Step 1: Get EVERYTHING so we can see what's actually in the DB
     const sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
-        FROM listings l 
-        LEFT JOIN users u ON l.user_id = u.id
+        SELECT l.id, l.title, l.location, l.category, l.amenities 
+        FROM listings l
     `;
 
     db.query(sql, (err, rows) => {
-        if (err) {
-            return res.status(500).json({ success: false, error: err.message });
-        }
+        if (err) return res.status(500).json({ success: false, error: err.message });
 
-        // Filter the rows using JavaScript logic
-        const filteredResults = rows.filter(row => {
-            // Combine all row data into one searchable string
-            const rowContent = `
-                ${row.title} 
-                ${row.location} 
-                ${row.category} 
-                ${row.amenities}
-            `.toLowerCase();
+        // Step 2: Create a "Match Map" to see WHY it's failing
+        const diagnosticResults = rows.map(row => {
+            const rowText = `${row.title} ${row.location} ${row.category}`.toLowerCase();
+            const analysis = keywords.map(word => ({
+                word: word,
+                found: rowText.includes(word)
+            }));
 
-            // Check if EVERY keyword exists somewhere in the rowContent
-            return keywords.every(word => rowContent.includes(word));
+            return {
+                id: row.id,
+                text_checked: rowText,
+                analysis: analysis,
+                is_full_match: analysis.every(a => a.found)
+            };
         });
+
+        // Step 3: Final Filter
+        const finalResults = rows.filter((r, index) => diagnosticResults[index].is_full_match);
 
         res.json({ 
             success: true, 
-            results: filteredResults,
-            debug_count: rows.length,
-            keywords_used: keywords
+            results: finalResults,
+            diagnostic_report: diagnosticResults // THIS WILL TELL US THE TRUTH
         });
     });
 };
