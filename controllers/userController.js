@@ -240,3 +240,60 @@ exports.getBookmarks = (req, res) => {
         res.json(rows);
     });
 };
+
+// 15. SMART SEARCH (Natural Language Processing)
+exports.smartSearch = (req, res) => {
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ success: false, message: "No search query provided" });
+
+    const query = message.toLowerCase();
+
+    // Regex to extract numbers for rooms and price
+    const roomMatch = query.match(/(\d+)\s*(room|bedroom|kwarto|beds)/);
+    const priceMatch = query.match(/(under|below|sa|na|less than|max)\s*(\d+)/);
+
+    // Initial SQL setup
+    let sql = `
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
+        FROM listings l 
+        JOIN users u ON l.user_id = u.id 
+        WHERE 1=1`;
+    let params = [];
+
+    // Logic for Rooms
+    if (roomMatch) {
+        sql += " AND l.rooms >= ?";
+        params.push(roomMatch[1]);
+    }
+
+    // Logic for Price
+    if (priceMatch) {
+        sql += " AND l.price <= ?";
+        params.push(priceMatch[2]);
+    }
+
+    // Logic for Category
+    if (query.includes("house") || query.includes("bahay")) {
+        sql += " AND l.category = 'House'";
+    } else if (query.includes("apartment")) {
+        sql += " AND l.category = 'Apartment'";
+    }
+
+    // Logic for general keywords (Location, Title, Amenities)
+    const keywords = query.split(' ').filter(w => w.length > 3);
+    keywords.forEach(word => {
+        // Skip common words we already handled
+        if (['rooms', 'house', 'apartment', 'under', 'below', 'bedroom'].includes(word)) return;
+        
+        sql += " AND (l.title LIKE ? OR l.location LIKE ? OR l.amenities LIKE ?)";
+        const wildCard = `%${word}%`;
+        params.push(wildCard, wildCard, wildCard);
+    });
+
+    sql += " ORDER BY l.created_at DESC";
+
+    db.query(sql, params, (err, rows) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        res.json({ success: true, results: rows });
+    });
+};
