@@ -241,21 +241,18 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - HIGH TOLERANCE VERSION (OR LOGIC)
+// 15. SMART SEARCH - DEBUGGING VERSION
 exports.smartSearch = (req, res) => {
-    // Kinukuha ang query kahit 'message' o 'query' ang gamitin ng frontend
     const userQuery = req.body.message || req.body.query || "";
     
     if (!userQuery.trim()) {
         return res.json({ success: true, results: [] });
     }
 
-    // Kinukuha ang mga salita at tinatanggal ang mga fillers
     const words = userQuery.toLowerCase().split(/\s+/).filter(w => 
         w.length > 1 && !['near', 'sa', 'na', 'the', 'an', 'with', 'and', 'for'].includes(w)
     );
 
-    // Basic SQL to get everything joined with user info
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
@@ -267,34 +264,36 @@ exports.smartSearch = (req, res) => {
 
     if (words.length > 0) {
         words.forEach(word => {
-            // Check if this word exists in ANY of these columns
             let searchPart = `(
                 LOWER(l.title) LIKE ? OR 
                 LOWER(l.location) LIKE ? OR 
                 LOWER(l.category) LIKE ? OR 
-                LOWER(l.amenities) LIKE ? OR
-                l.rooms LIKE ?
+                LOWER(l.amenities) LIKE ?
             )`;
             conditions.push(searchPart);
             
             const term = `%${word}%`;
-            params.push(term, term, term, term, term);
+            params.push(term, term, term, term);
         });
 
-        // UPDATED: Gagamit tayo ng OR para hindi mag-conflict ang magkaibang keywords
-        // This ensures "apartment" in category and "eu" in location both trigger the result.
         sql += conditions.join(" OR ");
     } else {
-        sql += "1=1"; // Fallback if only filler words were typed
+        sql += "1=1"; 
     }
 
     sql += " ORDER BY l.created_at DESC";
 
     db.query(sql, params, (err, rows) => {
         if (err) {
-            console.error("Database Error:", err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
-        res.json({ success: true, results: rows });
+        // WE ARE NOW SENDING THE SQL AND PARAMS BACK TO YOUR CHROMEBOOK
+        res.json({ 
+            success: true, 
+            results: rows, 
+            debug_sql: sql, 
+            debug_params: params,
+            debug_words_detected: words
+        });
     });
 };
