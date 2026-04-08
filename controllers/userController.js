@@ -241,50 +241,57 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH - EXTRA SAFE VERSION
+// 15. SMART SEARCH - UNIVERSAL SEARCH VERSION
 exports.smartSearch = (req, res) => {
-    // Kinukuha ang query kahit 'message' o 'query' ang gamitin ng frontend
-    const userQuery = req.body.message || req.body.query || "";
+    const userQuery = req.body.message || "";
     
-    if (!userQuery) {
-        return res.status(200).json({ success: true, results: [] });
+    if (!userQuery.trim()) {
+        return res.json({ success: true, results: [] });
     }
 
-    const cleanQuery = userQuery.toLowerCase().trim();
-    
-    // Split keywords (halimbawa: ["apartment", "eu"])
-    const words = cleanQuery.split(/\s+/).filter(w => w.length > 1 && !['near', 'sa', 'na', 'the', 'an'].includes(w));
+    const words = userQuery.toLowerCase().split(/\s+/).filter(w => w.length > 1);
 
+    // Basic SQL to get everything joined with user info
     let sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
         FROM listings l 
         JOIN users u ON l.user_id = u.id 
-        WHERE 1=1`;
+        WHERE `;
+    
+    let conditions = [];
     let params = [];
 
-    if (words.length > 0) {
-        sql += " AND (";
-        let searchParts = [];
-        
-        words.forEach(word => {
-            // Ito ang sikreto: chine-check natin lahat ng column para sa BAWAT salita
-            searchParts.push("(l.title LIKE ? OR l.location LIKE ? OR l.category LIKE ? OR l.amenities LIKE ?)");
-            const value = `%${word}%`;
-            params.push(value, value, value, value);
-        });
+    // For every word the user types (e.g., "apartment", "eu")
+    words.forEach(word => {
+        // Ignore filler words to prevent no matches
+        if (['near', 'with', 'the', 'and', 'for', 'sa', 'na'].includes(word)) return;
 
-        // Gagamit tayo ng AND sa pagitan ng keywords pero OR sa columns
-        // Para kung nag-type ka ng "apartment eu", kailangan mahanap niya ang "apartment" AT "eu" kahit saan silang column
-        sql += searchParts.join(" AND "); 
-        sql += ")";
+        // Check if this word exists in ANY of these columns
+        searchPart = `(
+            LOWER(l.title) LIKE ? OR 
+            LOWER(l.location) LIKE ? OR 
+            LOWER(l.category) LIKE ? OR 
+            LOWER(l.amenities) LIKE ? OR
+            l.rooms LIKE ?
+        )`;
+        conditions.push(searchPart);
+        
+        const term = `%${word}%`;
+        params.push(term, term, term, term, term);
+    });
+
+    // If we have valid words, join them with AND
+    // This means: Find a row that has word1 SOMEWHERE and word2 SOMEWHERE
+    if (conditions.length > 0) {
+        sql += conditions.join(" AND ");
+    } else {
+        sql += "1=1"; // Fallback if only filler words were typed
     }
 
     sql += " ORDER BY l.created_at DESC";
 
-    // Debugging: Makikita mo ito sa logs kung bakit ayaw (kung may access ka sa logs)
     db.query(sql, params, (err, rows) => {
         if (err) {
-            console.error("Database Error:", err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
         res.json({ success: true, results: rows });
