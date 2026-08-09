@@ -48,8 +48,11 @@ exports.getAllUsersAdmin = (req, res) => {
 };
 
 // --- USERS: PENDING LANDLORD REQUESTS ---
+// UPDATED: now also selects landlord_documents so the admin can review the
+// uploaded verification docs (Proof of Ownership, Local Permits, BIR
+// Registration) before approving/rejecting.
 exports.getLandlordRequests = (req, res) => {
-    const sql = `SELECT id, full_name, email, contact, address FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
+    const sql = `SELECT id, full_name, email, contact, address, landlord_documents FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
