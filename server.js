@@ -54,13 +54,17 @@ app.post('/api/toggle-bookmark', (req, res) => {
     if (action === 'add') {
         const query = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
         db.query(query, [userId, listingId], (err, result) => {
-            if (err) return res.status(500).json(err);
+            // FIX: Error objects don't serialize their .message via JSON.stringify,
+            // so res.json(err) was silently sending "{}" to the frontend. Now we
+            // explicitly pull out the message so real DB errors are visible.
+            if (err) return res.status(500).json({ error: err.message, message: err.message });
             res.json({ message: "Saved to database" });
         });
     } else {
         const query = "DELETE FROM bookmarks WHERE user_id = ? AND listing_id = ?";
         db.query(query, [userId, listingId], (err, result) => {
-            if (err) return res.status(500).json(err);
+            // FIX: same serialization issue as above.
+            if (err) return res.status(500).json({ error: err.message, message: err.message });
             res.json({ message: "Removed from database" });
         });
     }
@@ -70,7 +74,8 @@ app.post('/api/toggle-bookmark', (req, res) => {
 app.get('/api/get-bookmarks/:userId', (req, res) => {
     const query = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
     db.query(query, [req.params.userId], (err, results) => {
-        if (err) return res.status(500).json(err);
+        // FIX: same serialization issue as above.
+        if (err) return res.status(500).json({ error: err.message, message: err.message });
         res.json(results);
     });
 });
@@ -79,6 +84,21 @@ app.get('/api/get-bookmarks/:userId', (req, res) => {
 app.post('/api/update-listing', (req, res) => {
     // UPDATED: Added thumbnail and images to the destructuring to match home.js
     const { listingId, user_id, title, category, price, location, rooms, size, amenities, thumbnail, images } = req.body;
+
+    // NEW: Friendly guard for oversized photo payloads. Managed MySQL hosts
+    // (like Clever Cloud's free tier) often cap max_allowed_packet well below
+    // our 50mb express body limit, so a very large combined image payload can
+    // fail at the DB layer. This gives a clear message instead of a silent
+    // crash. Adjust the 15 (MB) threshold if your DB plan allows more.
+    if (images) {
+        const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
+        if (approxSizeMB > 15) {
+            return res.status(413).json({
+                success: false,
+                message: `Your photos are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use fewer photos or smaller images.`
+            });
+        }
+    }
 
     // UPDATED: The SQL now handles image updates if they are provided
     const query = `
@@ -92,7 +112,11 @@ app.post('/api/update-listing', (req, res) => {
     db.query(query, [title, category, price, location, rooms, size, amenities, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) {
             console.error("Update Error:", err);
-            return res.status(500).json(err);
+            // FIX: Error objects don't serialize their .message via JSON.stringify,
+            // so res.json(err) was silently sending "{}" to the frontend and hiding
+            // the real reason (e.g. "Data too long for column 'images'" if the
+            // images/thumbnail columns are still TEXT instead of LONGTEXT).
+            return res.status(500).json({ error: err.message, message: err.message });
         }
         if (result.affectedRows === 0) {
             return res.status(403).json({ message: "Unauthorized or listing not found" });
