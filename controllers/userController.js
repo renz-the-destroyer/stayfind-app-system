@@ -63,10 +63,16 @@ exports.getUserById = (req, res) => {
 };
 
 // 6. UPDATE USER PROFILE
+// UPDATED: Landlord approval gate added. Picking "Landlord" during profile
+// setup/settings no longer sets role = 'landlord' directly. It now stays as
+// 'tenant' and gets flagged via landlord_status = 'pending', which shows up
+// in the Admin Panel's "Landlord Requests" tab. Only the admin's approve
+// action (in adminController.js) actually sets role = 'landlord'. The
+// original 30-day personal-info lock logic below is untouched.
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email } = req.body;
 
-    db.query('SELECT full_name, address, contact, role, updated_at FROM users WHERE email = ?', [email], (err, results) => {
+    db.query('SELECT full_name, address, contact, role, landlord_status, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -96,18 +102,47 @@ exports.updateProfile = (req, res) => {
             });
         }
 
+        // NEW: Landlord approval gate logic.
+        // - If the user already has an approved landlord_status, letting them
+        //   keep/select 'landlord' is fine (they were approved previously).
+        // - Otherwise, selecting 'landlord' does NOT grant the role. It flips
+        //   landlord_status to 'pending' and keeps role as 'tenant' so the
+        //   Post Listing button stays hidden until an admin approves them.
+        let finalRole = role || user.role;
+        let finalLandlordStatus = user.landlord_status || 'none';
+
+        if (role === 'landlord') {
+            if (user.landlord_status === 'approved') {
+                finalRole = 'landlord';
+            } else {
+                finalRole = 'tenant';
+                finalLandlordStatus = 'pending';
+            }
+        }
+
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
-        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, ${timestampSQL} WHERE email = ?`;
+        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, ${timestampSQL} WHERE email = ?`;
         
         db.query(sql, [
             full_name || user.full_name, 
             address || user.address, 
             contact || user.contact, 
-            role || user.role, 
+            finalRole,
+            finalLandlordStatus,
             email
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ success: true, message: 'Profile updated successfully' });
+            // NEW: role and landlord_status are sent back so the frontend
+            // (dashboard.js / home.js) knows the REAL outcome instead of
+            // assuming whatever the user picked was granted.
+            res.json({ 
+                success: true, 
+                message: (role === 'landlord' && finalLandlordStatus === 'pending')
+                    ? 'Landlord request submitted! Waiting for admin approval.'
+                    : 'Profile updated successfully',
+                role: finalRole,
+                landlord_status: finalLandlordStatus
+            });
         });
     });
 };
