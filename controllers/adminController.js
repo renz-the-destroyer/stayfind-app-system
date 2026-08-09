@@ -61,9 +61,11 @@ exports.getLandlordRequests = (req, res) => {
 
 // --- USERS: APPROVE LANDLORD REQUEST ---
 // This is the ONLY place a user's role actually becomes 'landlord'.
+// UPDATED: also clears any previous rejection reason, so an old rejection
+// note doesn't linger on the account after a later approval.
 exports.approveLandlord = (req, res) => {
     const { id } = req.params;
-    const sql = `UPDATE users SET role = 'landlord', landlord_status = 'approved' WHERE id = ?`;
+    const sql = `UPDATE users SET role = 'landlord', landlord_status = 'approved', landlord_rejection_reason = NULL WHERE id = ?`;
     db.query(sql, [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
@@ -72,10 +74,19 @@ exports.approveLandlord = (req, res) => {
 };
 
 // --- USERS: REJECT LANDLORD REQUEST ---
+// UPDATED: now accepts a `reason` in the request body (typed by the admin in
+// the panel) and stores it in landlord_rejection_reason. This is what
+// home.js reads back and shows to the user in a notification, so they know
+// exactly what to fix before trying again. Falls back to a generic message
+// if no reason was provided (shouldn't normally happen since admin.js now
+// requires one).
 exports.rejectLandlord = (req, res) => {
     const { id } = req.params;
-    const sql = `UPDATE users SET landlord_status = 'rejected' WHERE id = ?`;
-    db.query(sql, [id], (err, result) => {
+    const { reason } = req.body;
+    const finalReason = (reason && reason.trim() !== "") ? reason.trim() : "Your submitted documents did not meet our requirements.";
+
+    const sql = `UPDATE users SET landlord_status = 'rejected', landlord_rejection_reason = ? WHERE id = ?`;
+    db.query(sql, [finalReason, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
         res.json({ success: true, message: 'Landlord request rejected' });
