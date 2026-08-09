@@ -140,12 +140,35 @@ exports.getAllListings = (req, res) => {
 // 8. ADD NEW LISTING
 exports.addListing = (req, res) => {
     const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail } = req.body;
+
+    // NEW: Friendly guard for oversized photo payloads, matching the one added
+    // to /api/update-listing in server.js. Managed MySQL hosts (like Clever
+    // Cloud's free tier) often cap max_allowed_packet well below our 50mb
+    // express body limit, so a very large combined image payload can fail at
+    // the DB layer. This gives a clear message instead of a silent crash.
+    if (images) {
+        const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
+        if (approxSizeMB > 15) {
+            return res.status(413).json({
+                success: false,
+                message: `Your photos are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use fewer photos or smaller images.`,
+                error: `Payload too large (~${approxSizeMB.toFixed(1)}MB)`
+            });
+        }
+    }
+
     const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail) 
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail];
 
     db.query(sql, values, (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
+        // FIX: now also included as `message` (in addition to the existing
+        // `error` field) since home.js reads `errResult.message` when showing
+        // the failure popup. Previously the real DB error (e.g. "Data too long
+        // for column 'images'" if the column is still TEXT instead of
+        // LONGTEXT) was silently swallowed and the user only saw a generic
+        // "Failed to post" alert.
+        if (err) return res.status(500).json({ success: false, error: err.message, message: err.message });
         res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
     });
 };
@@ -196,6 +219,13 @@ exports.deleteListing = (req, res) => {
 };
 
 // 12. UPDATE LISTING
+// NOTE: This function is currently NOT the one actually handling
+// POST /api/update-listing at runtime — server.js registers its own inline
+// handler for that exact path BEFORE `app.use('/api', routes)` is mounted,
+// so Express matches server.js's handler first and this one is effectively
+// unreachable dead code. Left in place and fixed anyway (per "do not remove
+// code") in case you later remove the inline handler in server.js and want
+// to route update-listing through this controller instead.
 exports.updateListing = (req, res) => {
     const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
     
@@ -203,7 +233,7 @@ exports.updateListing = (req, res) => {
                  WHERE id = ? AND user_id = ?`;
     
     db.query(sql, [title, category, price, location, rooms, size, amenities, listingId, user_id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
+        if (err) return res.status(500).json({ error: err.message, message: err.message });
         if (result.affectedRows > 0) {
             res.json({ success: true, message: 'Listing updated successfully' });
         } else {
