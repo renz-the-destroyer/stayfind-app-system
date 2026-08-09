@@ -63,16 +63,17 @@ exports.getUserById = (req, res) => {
 };
 
 // 6. UPDATE USER PROFILE
-// UPDATED: Landlord approval gate added. Picking "Landlord" during profile
-// setup/settings no longer sets role = 'landlord' directly. It now stays as
-// 'tenant' and gets flagged via landlord_status = 'pending', which shows up
-// in the Admin Panel's "Landlord Requests" tab. Only the admin's approve
-// action (in adminController.js) actually sets role = 'landlord'. The
-// original 30-day personal-info lock logic below is untouched.
+// UPDATED: Landlord approval gate. Picking "Landlord" no longer sets role =
+// 'landlord' directly — it now REQUIRES 3 verification documents
+// (landlord_documents) and flips landlord_status to 'pending', which shows
+// up in the Admin Panel's "Landlord Requests" tab along with the uploaded
+// documents for review. Only the admin's approve action (in
+// adminController.js) actually sets role = 'landlord'. The original 30-day
+// personal-info lock logic below is untouched.
 exports.updateProfile = (req, res) => {
-    const { full_name, address, contact, role, email } = req.body;
+    const { full_name, address, contact, role, email, landlord_documents } = req.body;
 
-    db.query('SELECT full_name, address, contact, role, landlord_status, updated_at FROM users WHERE email = ?', [email], (err, results) => {
+    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -104,24 +105,46 @@ exports.updateProfile = (req, res) => {
 
         // NEW: Landlord approval gate logic.
         // - If the user already has an approved landlord_status, letting them
-        //   keep/select 'landlord' is fine (they were approved previously).
-        // - Otherwise, selecting 'landlord' does NOT grant the role. It flips
-        //   landlord_status to 'pending' and keeps role as 'tenant' so the
-        //   Post Listing button stays hidden until an admin approves them.
+        //   keep/select 'landlord' is fine (they were approved previously) —
+        //   no documents required again.
+        // - Otherwise, selecting 'landlord' does NOT grant the role. It
+        //   REQUIRES landlord_documents (3 base64 images joined by '|||')
+        //   before it will even flip landlord_status to 'pending'. Without
+        //   documents, the request is rejected outright with a 400.
         let finalRole = role || user.role;
         let finalLandlordStatus = user.landlord_status || 'none';
+        let finalLandlordDocs = user.landlord_documents; // unchanged by default
 
         if (role === 'landlord') {
             if (user.landlord_status === 'approved') {
                 finalRole = 'landlord';
             } else {
+                // NEW: require documents for any fresh (non-approved) landlord request
+                if (!landlord_documents || landlord_documents.trim() === "") {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Please upload all 3 required landlord verification documents (Proof of Ownership, Local Permits, BIR Registration) before submitting your request.'
+                    });
+                }
+
+                // NEW: basic sanity check the payload isn't absurdly oversized
+                // for the DB (same pattern as listing image guards elsewhere).
+                const approxSizeMB = Buffer.byteLength(landlord_documents, 'utf8') / (1024 * 1024);
+                if (approxSizeMB > 20) {
+                    return res.status(413).json({
+                        success: false,
+                        message: `Your documents are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use smaller/clearer photos.`
+                    });
+                }
+
                 finalRole = 'tenant';
                 finalLandlordStatus = 'pending';
+                finalLandlordDocs = landlord_documents;
             }
         }
 
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
-        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, ${timestampSQL} WHERE email = ?`;
+        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, ${timestampSQL} WHERE email = ?`;
         
         db.query(sql, [
             full_name || user.full_name, 
@@ -129,6 +152,7 @@ exports.updateProfile = (req, res) => {
             contact || user.contact, 
             finalRole,
             finalLandlordStatus,
+            finalLandlordDocs,
             email
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
@@ -138,7 +162,7 @@ exports.updateProfile = (req, res) => {
             res.json({ 
                 success: true, 
                 message: (role === 'landlord' && finalLandlordStatus === 'pending')
-                    ? 'Landlord request submitted! Waiting for admin approval.'
+                    ? 'Landlord request and documents submitted! Waiting for admin approval.'
                     : 'Profile updated successfully',
                 role: finalRole,
                 landlord_status: finalLandlordStatus
