@@ -8,6 +8,8 @@ require('dotenv').config();
 const db = require('./config/db');
 // ROUTES
 const routes = require('./routes/index.js');
+// NEW: Admin routes (separate router, protected by ADMIN_KEY)
+const adminRoutes = require('./routes/adminRoutes');
 
 // UTILIZATION OF EXPRESS
 const app = express();
@@ -127,6 +129,11 @@ app.post('/api/update-listing', (req, res) => {
 
 // USE ROUTES
 app.use('/api', routes);
+// NEW: Mount admin routes under /api/admin. Anything hitting
+// /api/admin/login, /api/admin/stats, /api/admin/users, etc. is handled by
+// adminRoutes.js -> adminController.js. This is what admin.js's API_BASE
+// ("https://stayfind-app-system.onrender.com/api/admin") depends on.
+app.use('/api/admin', adminRoutes);
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
