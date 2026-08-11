@@ -1,15 +1,25 @@
 const db = require('../config/db');
 
 // --- ADMIN LOGIN ---
-// Checks against the ADMIN_EMAIL/ADMIN_PASSWORD in .env and hands back the
-// ADMIN_KEY, which the frontend stores and sends on every later request.
+// UPDATED: now checks the `admins` DB table instead of the single
+// ADMIN_EMAIL/ADMIN_PASSWORD pair in .env, so multiple admin accounts can
+// exist and log in independently. ADMIN_KEY is still the shared secret
+// returned on success and required on every other admin route (unchanged).
 exports.adminLogin = (req, res) => {
     const { email, password } = req.body;
 
-    if (email === process.env.ADMIN_EMAIL && password === process.env.ADMIN_PASSWORD) {
-        return res.json({ success: true, adminKey: process.env.ADMIN_KEY });
+    if (!email || !password) {
+        return res.status(400).json({ success: false, message: 'Email and password are required.' });
     }
-    return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+
+    const sql = `SELECT id, full_name, email FROM admins WHERE email = ? AND password = ?`;
+    db.query(sql, [email, password], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (rows.length === 0) {
+            return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+        }
+        return res.json({ success: true, adminKey: process.env.ADMIN_KEY, admin: rows[0] });
+    });
 };
 
 // --- MIDDLEWARE: guards every route below it ---
@@ -48,9 +58,6 @@ exports.getAllUsersAdmin = (req, res) => {
 };
 
 // --- USERS: PENDING LANDLORD REQUESTS ---
-// UPDATED: now also selects landlord_documents so the admin can review the
-// uploaded verification docs (Proof of Ownership, Local Permits, BIR
-// Registration) before approving/rejecting.
 exports.getLandlordRequests = (req, res) => {
     const sql = `SELECT id, full_name, email, contact, address, landlord_documents FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
     db.query(sql, (err, rows) => {
@@ -61,8 +68,6 @@ exports.getLandlordRequests = (req, res) => {
 
 // --- USERS: APPROVE LANDLORD REQUEST ---
 // This is the ONLY place a user's role actually becomes 'landlord'.
-// UPDATED: also clears any previous rejection reason, so an old rejection
-// note doesn't linger on the account after a later approval.
 exports.approveLandlord = (req, res) => {
     const { id } = req.params;
     const sql = `UPDATE users SET role = 'landlord', landlord_status = 'approved', landlord_rejection_reason = NULL WHERE id = ?`;
@@ -74,12 +79,6 @@ exports.approveLandlord = (req, res) => {
 };
 
 // --- USERS: REJECT LANDLORD REQUEST ---
-// UPDATED: now accepts a `reason` in the request body (typed by the admin in
-// the panel) and stores it in landlord_rejection_reason. This is what
-// home.js reads back and shows to the user in a notification, so they know
-// exactly what to fix before trying again. Falls back to a generic message
-// if no reason was provided (shouldn't normally happen since admin.js now
-// requires one).
 exports.rejectLandlord = (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -170,5 +169,94 @@ exports.deleteReviewAdmin = (req, res) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Review not found' });
         res.json({ success: true, message: 'Review deleted successfully' });
+    });
+};
+
+// --- NEW: ADMIN ACCOUNT MANAGEMENT (CRUD for admin accounts themselves) ---
+// This is what powers the new "Settings" panel in admin.html, letting a
+// logged-in admin create/edit/delete OTHER admin accounts.
+
+// LIST all admins (id, name, email, created_at only - never sends passwords)
+exports.getAllAdmins = (req, res) => {
+    const sql = `SELECT id, full_name, email, created_at FROM admins ORDER BY id ASC`;
+    db.query(sql, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// CREATE a new admin account
+exports.createAdmin = (req, res) => {
+    const { full_name, email, password } = req.body;
+
+    if (!full_name || !email || !password) {
+        return res.status(400).json({ success: false, message: 'Full name, email, and password are all required.' });
+    }
+    if (password.length < 6) {
+        return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+    }
+
+    const sql = `INSERT INTO admins (full_name, email, password) VALUES (?, ?, ?)`;
+    db.query(sql, [full_name, email, password], (err, result) => {
+        if (err) {
+            // MySQL duplicate-key error code, thrown by the UNIQUE constraint on email
+            if (err.code === 'ER_DUP_ENTRY') {
+                return res.status(409).json({ success: false, message: 'An admin with that email already exists.' });
+            }
+            return res.status(500).json({ error: err.message });
+        }
+        res.json({ success: true, message: 'Admin account created successfully', id: result.insertId });
+    });
+};
+
+// UPDATE an existing admin account. Password is optional on edit - leaving
+// it blank on the frontend keeps the existing password unchanged.
+exports.updateAdmin = (req, res) => {
+    const { id } = req.params;
+    const { full_name, email, password } = req.body;
+
+    if (!full_name || !email) {
+        return res.status(400).json({ success: false, message: 'Full name and email are required.' });
+    }
+
+    const finishUpdate = (sql, params) => {
+        db.query(sql, params, (err, result) => {
+            if (err) {
+                if (err.code === 'ER_DUP_ENTRY') {
+                    return res.status(409).json({ success: false, message: 'Another admin already uses that email.' });
+                }
+                return res.status(500).json({ error: err.message });
+            }
+            if (result.affectedRows === 0) return res.status(404).json({ message: 'Admin not found' });
+            res.json({ success: true, message: 'Admin account updated successfully' });
+        });
+    };
+
+    if (password && password.trim() !== "") {
+        if (password.length < 6) {
+            return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
+        }
+        finishUpdate(`UPDATE admins SET full_name=?, email=?, password=? WHERE id=?`, [full_name, email, password, id]);
+    } else {
+        finishUpdate(`UPDATE admins SET full_name=?, email=? WHERE id=?`, [full_name, email, id]);
+    }
+};
+
+// DELETE an admin account. Guard: never allow deleting the last remaining
+// admin, or the panel becomes permanently inaccessible to everyone.
+exports.deleteAdmin = (req, res) => {
+    const { id } = req.params;
+
+    db.query('SELECT COUNT(*) AS total FROM admins', (err, countRows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (countRows[0].total <= 1) {
+            return res.status(400).json({ success: false, message: 'Cannot delete the last remaining admin account.' });
+        }
+
+        db.query('DELETE FROM admins WHERE id = ?', [id], (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
+            if (result.affectedRows === 0) return res.status(404).json({ message: 'Admin not found' });
+            res.json({ success: true, message: 'Admin account deleted successfully' });
+        });
     });
 };
