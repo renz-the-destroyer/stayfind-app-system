@@ -30,4 +30,10 @@ router.delete('/listings/:id', adminController.deleteListingAdmin);
 router.get('/reviews', adminController.getAllReviewsAdmin);
 router.delete('/reviews/:id', adminController.deleteReviewAdmin);
 
+// NEW: Admin account management (CRUD for admin accounts themselves)
+router.get('/admins', adminController.getAllAdmins);
+router.post('/admins', adminController.createAdmin);
+router.put('/admins/:id', adminController.updateAdmin);
+router.delete('/admins/:id', adminController.deleteAdmin);
+
 module.exports = router;
