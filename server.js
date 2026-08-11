@@ -10,6 +10,9 @@ const db = require('./config/db');
 const routes = require('./routes/index.js');
 // NEW: Admin routes (separate router, protected by ADMIN_KEY)
 const adminRoutes = require('./routes/adminRoutes');
+// NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
+// Used here AND in controllers/userController.js so both stay in sync.
+const { runSmartSearch } = require('./utils/smartSearchLogic');
 
 // UTILIZATION OF EXPRESS
 const app = express();
@@ -20,29 +23,42 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// --- NEW: SMART SEARCH ENDPOINT ---
-// This handles the AI-like filtering of listings based on chat input
+// --- UPDATED: SMART SEARCH ENDPOINT ---
+// This handles the AI-like filtering of listings based on chat input.
+//
+// UPDATED: This used to be a plain SQL LIKE '%message%' match against the
+// WHOLE typed phrase, which meant a query like "house malapit sa eu" was
+// searched for as one literal string "house malapit sa eu" - something that
+// obviously never appears in any listing's text, so it almost always
+// returned zero results. It also completely ignored landlord/tenant role
+// scoping, so a landlord could see every user's listings through Smart
+// Search (inconsistent with the regular Browse view).
+//
+// Now it fetches all listings (with landlord info joined, same as the normal
+// /view endpoint) and hands them to the shared runSmartSearch() helper,
+// which strips Tagalog/English filler words ("malapit", "sa", "na", "may"),
+// translates common Taglish terms ("bahay" -> "house", "kwarto" -> "bedspace",
+// "parking"/"paradahan" -> "parking", "ketchen" -> "kitchen"), understands
+// price/room filters ("under 5000", "3 rooms"), and ranks results by how many
+// meaningful keywords actually matched.
 app.post('/api/smart-search', (req, res) => {
-    const { message } = req.body;
-    
-    // Simple logic to extract potential keywords from the user message
-    // In a real AI setup, you'd send 'message' to an AI API here.
-    // For now, we search the database for matches in title, location, or amenities.
-    const searchTerm = `%${message}%`;
+    const { message, userContext } = req.body;
+    const role = userContext?.role;
+    const userId = userContext?.id;
+
     const query = `
-        SELECT * FROM listings 
-        WHERE title LIKE ? 
-        OR location LIKE ? 
-        OR amenities LIKE ? 
-        OR category LIKE ?
-        LIMIT 5
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email
+        FROM listings l
+        LEFT JOIN users u ON l.user_id = u.id
     `;
 
-    db.query(query, [searchTerm, searchTerm, searchTerm, searchTerm], (err, results) => {
+    db.query(query, (err, rows) => {
         if (err) {
             console.error("Smart Search Error:", err);
             return res.status(500).json({ error: "Search failed" });
         }
+
+        const results = runSmartSearch(message, rows, role, userId);
         res.json({ results });
     });
 });

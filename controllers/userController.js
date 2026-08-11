@@ -1,4 +1,7 @@
 const db = require('../config/db');
+// NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
+// Used here AND in server.js so both stay in sync.
+const { runSmartSearch } = require('../utils/smartSearchLogic');
 
 // 1. GET ALL USERS (Used for Login)
 exports.getAllUsers = (req, res) => {
@@ -330,38 +333,29 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. userController.js - Updated Smart Search with Role Security
+// 15. SMART SEARCH (Taglish-aware, with Role Security)
+// NOTE: Like updateListing() above, this is currently NOT the handler that
+// actually runs for POST /api/smart-search — server.js registers its own
+// inline handler for that exact path BEFORE app.use('/api', routes) is
+// mounted, so Express matches server.js's handler first. Both versions now
+// share the same parsing/scoring logic via utils/smartSearchLogic.js, so
+// they can't drift out of sync again. If you ever remove the inline handler
+// in server.js, this one is ready to take over unchanged.
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
     // Access user info from the request (sent from frontend)
     const { role, id: userId } = req.body.userContext || {}; 
-    
-    const keywords = userQuery.toLowerCase().trim().split(/\s+/).filter(w => w.length > 1);
 
-    if (keywords.length === 0) return res.json({ success: true, results: [] });
-
-    // Step 1: Base SQL Query
-    let sql = `
-        SELECT l.*, u.full_name AS landlord_name 
+    const sql = `
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email
         FROM listings l 
         LEFT JOIN users u ON l.user_id = u.id
     `;
 
-    // Step 2: Role Filtering logic
-    // If landlord, they only see their own items. If tenant, they see all.
-    let roleCondition = (role === 'landlord') ? `l.user_id = ${db.escape(userId)}` : `1=1`;
-
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
 
-        const finalResults = rows.filter(row => {
-            // Role Check: Ensure landlords only see their own listings in search
-            const isOwner = (role === 'landlord') ? String(row.user_id) === String(userId) : true;
-            if (!isOwner) return false;
-
-            const allTextInRow = `${row.title} ${row.location} ${row.category} ${row.amenities}`.toLowerCase();
-            return keywords.every(word => allTextInRow.includes(word));
-        });
+        const finalResults = runSmartSearch(userQuery, rows, role, userId);
 
         res.json({ success: true, results: finalResults });
     });
