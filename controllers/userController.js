@@ -200,8 +200,13 @@ exports.getAllListings = (req, res) => {
 };
 
 // 8. ADD NEW LISTING
+// UPDATED: now also accepts/saves `status` ('available' | 'occupied'), used
+// by the new Available/Occupied filter buttons on home.html. Defaults to
+// 'available' if not sent or sent as anything unrecognized, so old
+// callers/clients that don't know about this field still work fine.
 exports.addListing = (req, res) => {
-    const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail } = req.body;
+    const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, status } = req.body;
+    const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
     // NEW: Friendly guard for oversized photo payloads, matching the one added
     // to /api/update-listing in server.js. Managed MySQL hosts (like Clever
@@ -219,9 +224,9 @@ exports.addListing = (req, res) => {
         }
     }
 
-    const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail];
+    const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, status) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+    const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, finalStatus];
 
     db.query(sql, values, (err, result) => {
         // FIX: now also included as `message` (in addition to the existing
@@ -288,13 +293,16 @@ exports.deleteListing = (req, res) => {
 // unreachable dead code. Left in place and fixed anyway (per "do not remove
 // code") in case you later remove the inline handler in server.js and want
 // to route update-listing through this controller instead.
+// UPDATED: now also accepts/saves `status`, matching the live handler in
+// server.js, so this stays in sync if it's ever swapped back in.
 exports.updateListing = (req, res) => {
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities } = req.body;
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities, status } = req.body;
+    const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
     
-    const sql = `UPDATE listings SET title = ?, category = ?, price = ?, location = ?, rooms = ?, size = ?, amenities = ? 
+    const sql = `UPDATE listings SET title = ?, category = ?, price = ?, location = ?, rooms = ?, size = ?, amenities = ?, status = ? 
                  WHERE id = ? AND user_id = ?`;
     
-    db.query(sql, [title, category, price, location, rooms, size, amenities, listingId, user_id], (err, result) => {
+    db.query(sql, [title, category, price, location, rooms, size, amenities, finalStatus, listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message, message: err.message });
         if (result.affectedRows > 0) {
             res.json({ success: true, message: 'Listing updated successfully' });
