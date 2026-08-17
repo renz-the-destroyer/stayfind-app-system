@@ -99,9 +99,13 @@ app.get('/api/get-bookmarks/:userId', (req, res) => {
 });
 
 // --- NEW: EDIT/UPDATE PROPERTY ENDPOINT ---
+// UPDATED: now also accepts/saves `status` ('available' | 'occupied') so
+// landlords can mark a listing as occupied/available from the Edit Listing
+// modal on home.html. Defaults to 'available' if not sent.
 app.post('/api/update-listing', (req, res) => {
     // UPDATED: Added thumbnail and images to the destructuring to match home.js
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities, thumbnail, images } = req.body;
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities, thumbnail, images, status } = req.body;
+    const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
     // NEW: Friendly guard for oversized photo payloads. Managed MySQL hosts
     // (like Clever Cloud's free tier) often cap max_allowed_packet well below
@@ -118,16 +122,16 @@ app.post('/api/update-listing', (req, res) => {
         }
     }
 
-    // UPDATED: The SQL now handles image updates if they are provided
+    // UPDATED: The SQL now handles image updates if they are provided, plus status
     const query = `
         UPDATE listings 
-        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=?, 
+        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=?, status=?,
             thumbnail = COALESCE(?, thumbnail), 
             images = COALESCE(?, images)
         WHERE id=? AND user_id=?
     `;
 
-    db.query(query, [title, category, price, location, rooms, size, amenities, thumbnail, images, listingId, user_id], (err, result) => {
+    db.query(query, [title, category, price, location, rooms, size, amenities, finalStatus, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) {
             console.error("Update Error:", err);
             // FIX: Error objects don't serialize their .message via JSON.stringify,
