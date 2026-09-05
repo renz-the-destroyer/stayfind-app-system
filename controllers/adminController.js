@@ -58,8 +58,14 @@ exports.getAllUsersAdmin = (req, res) => {
 };
 
 // --- USERS: PENDING LANDLORD REQUESTS ---
+// UPDATED: now also selects landlord_doc_name — the name the applicant typed
+// as "printed on their Proof of Ownership document" during signup/settings.
+// admin.js uses this alongside the user's registered full_name to render a
+// Match / Mismatch / No name given badge in the Landlord Requests table, so
+// the admin can spot obvious name mismatches at a glance before even opening
+// the document viewer.
 exports.getLandlordRequests = (req, res) => {
-    const sql = `SELECT id, full_name, email, contact, address, landlord_documents FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
+    const sql = `SELECT id, full_name, email, contact, address, landlord_documents, landlord_doc_name FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
@@ -79,6 +85,10 @@ exports.approveLandlord = (req, res) => {
 };
 
 // --- USERS: REJECT LANDLORD REQUEST ---
+// NOTE: unchanged — still just accepts whatever string is passed as `reason`
+// in the request body. admin.js now builds that string from a template
+// picker (or custom text) before calling this endpoint, but this controller
+// doesn't need to know or care where the string came from.
 exports.rejectLandlord = (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
