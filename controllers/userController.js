@@ -103,13 +103,38 @@ exports.updateProfile = (req, res) => {
 
         console.log(`--- Update Attempt for ${email} ---`);
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
+        const isLockedOut = !isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30;
 
-        if (!isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30) {
+        // UPDATED: Decoupled the 30-day personal-info lock from landlord
+        // verification requests. Previously, ANY submission that touched
+        // full_name/address/contact while locked was rejected outright —
+        // including a landlord request, since dashboard.html/home.js resend
+        // those same 3 fields alongside the documents every time. That meant
+        // a returning user requesting landlord status got blocked by this
+        // lock even though they never intended to edit their personal info,
+        // just because the retyped text didn't match the stored value
+        // character-for-character.
+        //
+        // Now:
+        // - A PLAIN personal-info edit (role isn't 'landlord') still gets
+        //   blocked exactly as before if locked — that protection is intact.
+        // - A LANDLORD REQUEST (role === 'landlord', not yet approved) is
+        //   NEVER blocked by this lock. If locked, we simply ignore the
+        //   full_name/address/contact values in this submission (keep the
+        //   existing ones) and still process the role/documents normally.
+        if (isLockedOut && role !== 'landlord') {
             return res.status(403).json({ 
                 success: false, 
                 message: `Personal information can only be changed once every 30 days. Please wait ${30 - diffInDays} more days.` 
             });
         }
+
+        // NEW: when locked but this IS a landlord request, fall back to the
+        // user's existing personal info instead of whatever was retyped in
+        // the form, so the UPDATE below can't silently change it either.
+        const effectiveFullName = isLockedOut ? user.full_name : (full_name || user.full_name);
+        const effectiveAddress = isLockedOut ? user.address : (address || user.address);
+        const effectiveContact = isLockedOut ? user.contact : (contact || user.contact);
 
         // NEW: Landlord approval gate logic.
         // - If the user already has an approved landlord_status, letting them
@@ -167,13 +192,19 @@ exports.updateProfile = (req, res) => {
             }
         }
 
-        const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
+        // NEW: only bump updated_at if the personal info actually got applied
+        // this time (i.e. NOT skipped due to the lock). If we ignored the
+        // retyped info because of isLockedOut, the original updated_at should
+        // keep counting down to the same 30-day mark as before — otherwise a
+        // landlord request would keep resetting the timer forever and the
+        // lock would never actually expire.
+        const timestampSQL = (isChangingPersonalInfo && !isLockedOut) ? 'updated_at = NOW()' : 'updated_at = updated_at';
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, landlord_doc_name = ?, ${timestampSQL} WHERE email = ?`;
         
         db.query(sql, [
-            full_name || user.full_name, 
-            address || user.address, 
-            contact || user.contact, 
+            effectiveFullName,
+            effectiveAddress,
+            effectiveContact,
             finalRole,
             finalLandlordStatus,
             finalLandlordDocs,
@@ -181,14 +212,26 @@ exports.updateProfile = (req, res) => {
             email
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
+
+            // NEW: build a message that also tells the user if their
+            // personal-info edits were skipped this time because of the lock,
+            // so they aren't confused about why their retyped address/contact
+            // didn't seem to "stick."
+            let message;
+            if (role === 'landlord' && finalLandlordStatus === 'pending') {
+                message = isLockedOut
+                    ? `Landlord request and documents submitted! (Note: your personal info edits were not applied — you can change those again in ${30 - diffInDays} more days.) Waiting for admin approval.`
+                    : 'Landlord request and documents submitted! Waiting for admin approval.';
+            } else {
+                message = 'Profile updated successfully';
+            }
+
             // NEW: role and landlord_status are sent back so the frontend
             // (dashboard.js / home.js) knows the REAL outcome instead of
             // assuming whatever the user picked was granted.
             res.json({ 
                 success: true, 
-                message: (role === 'landlord' && finalLandlordStatus === 'pending')
-                    ? 'Landlord request and documents submitted! Waiting for admin approval.'
-                    : 'Profile updated successfully',
+                message,
                 role: finalRole,
                 landlord_status: finalLandlordStatus
             });
