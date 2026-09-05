@@ -67,16 +67,21 @@ exports.getUserById = (req, res) => {
 
 // 6. UPDATE USER PROFILE
 // UPDATED: Landlord approval gate. Picking "Landlord" no longer sets role =
-// 'landlord' directly — it now REQUIRES 3 verification documents
-// (landlord_documents) and flips landlord_status to 'pending', which shows
-// up in the Admin Panel's "Landlord Requests" tab along with the uploaded
-// documents for review. Only the admin's approve action (in
-// adminController.js) actually sets role = 'landlord'. The original 30-day
-// personal-info lock logic below is untouched.
+// 'landlord' directly — it now REQUIRES 4 verification items
+// (landlord_documents: Proof of Ownership, Local Permits, BIR Registration,
+// and a Selfie holding valid ID — all 4 base64 images joined by '|||', in
+// that exact order) PLUS landlord_doc_name (the name the applicant typed as
+// "printed on their Proof of Ownership document", used by the admin panel
+// for a name cross-check against the registered full_name). Submitting a
+// fresh request flips landlord_status to 'pending', which shows up in the
+// Admin Panel's "Landlord Requests" tab along with the uploaded documents
+// and the name-match indicator for review. Only the admin's approve action
+// (in adminController.js) actually sets role = 'landlord'. The original
+// 30-day personal-info lock logic below is untouched.
 exports.updateProfile = (req, res) => {
-    const { full_name, address, contact, role, email, landlord_documents } = req.body;
+    const { full_name, address, contact, role, email, landlord_documents, landlord_doc_name } = req.body;
 
-    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, updated_at FROM users WHERE email = ?', [email], (err, results) => {
+    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, landlord_doc_name, updated_at FROM users WHERE email = ?', [email], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -111,12 +116,16 @@ exports.updateProfile = (req, res) => {
         //   keep/select 'landlord' is fine (they were approved previously) —
         //   no documents required again.
         // - Otherwise, selecting 'landlord' does NOT grant the role. It
-        //   REQUIRES landlord_documents (3 base64 images joined by '|||')
-        //   before it will even flip landlord_status to 'pending'. Without
-        //   documents, the request is rejected outright with a 400.
+        //   REQUIRES landlord_documents (4 base64 images joined by '|||':
+        //   ownership, permits, BIR, selfie-with-ID) AND landlord_doc_name
+        //   (the applicant's typed "name on document", used for the admin
+        //   panel's name cross-check) before it will even flip
+        //   landlord_status to 'pending'. Without either, the request is
+        //   rejected outright with a 400.
         let finalRole = role || user.role;
         let finalLandlordStatus = user.landlord_status || 'none';
         let finalLandlordDocs = user.landlord_documents; // unchanged by default
+        let finalDocName = user.landlord_doc_name; // unchanged by default
 
         if (role === 'landlord') {
             if (user.landlord_status === 'approved') {
@@ -126,14 +135,25 @@ exports.updateProfile = (req, res) => {
                 if (!landlord_documents || landlord_documents.trim() === "") {
                     return res.status(400).json({
                         success: false,
-                        message: 'Please upload all 3 required landlord verification documents (Proof of Ownership, Local Permits, BIR Registration) before submitting your request.'
+                        message: 'Please upload all 4 required landlord verification items (Proof of Ownership, Local Permits, BIR Registration, and a Selfie with valid ID) before submitting your request.'
+                    });
+                }
+
+                // NEW: require the typed owner name for the admin's name cross-check
+                if (!landlord_doc_name || landlord_doc_name.trim() === "") {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'Please provide the name shown on your Proof of Ownership document.'
                     });
                 }
 
                 // NEW: basic sanity check the payload isn't absurdly oversized
                 // for the DB (same pattern as listing image guards elsewhere).
+                // Raised slightly from the original 20MB to 25MB now that a
+                // 4th image (the ID selfie) is included in the same combined
+                // payload.
                 const approxSizeMB = Buffer.byteLength(landlord_documents, 'utf8') / (1024 * 1024);
-                if (approxSizeMB > 20) {
+                if (approxSizeMB > 25) {
                     return res.status(413).json({
                         success: false,
                         message: `Your documents are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use smaller/clearer photos.`
@@ -143,11 +163,12 @@ exports.updateProfile = (req, res) => {
                 finalRole = 'tenant';
                 finalLandlordStatus = 'pending';
                 finalLandlordDocs = landlord_documents;
+                finalDocName = landlord_doc_name.trim();
             }
         }
 
         const timestampSQL = isChangingPersonalInfo ? 'updated_at = NOW()' : 'updated_at = updated_at';
-        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, ${timestampSQL} WHERE email = ?`;
+        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, landlord_doc_name = ?, ${timestampSQL} WHERE email = ?`;
         
         db.query(sql, [
             full_name || user.full_name, 
@@ -156,6 +177,7 @@ exports.updateProfile = (req, res) => {
             finalRole,
             finalLandlordStatus,
             finalLandlordDocs,
+            finalDocName,
             email
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
