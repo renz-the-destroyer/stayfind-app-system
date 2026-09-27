@@ -10,10 +10,6 @@ const db = require('./config/db');
 const routes = require('./routes/index.js');
 // NEW: Admin routes (separate router, protected by ADMIN_KEY)
 const adminRoutes = require('./routes/adminRoutes');
-// NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
-// Used here AND in controllers/userController.js so both stay in sync.
-const { runSmartSearch } = require('./utils/smartSearchLogic');
-
 // UTILIZATION OF EXPRESS
 const app = express();
 
@@ -23,138 +19,23 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// --- UPDATED: SMART SEARCH ENDPOINT ---
-// This handles the AI-like filtering of listings based on chat input.
+// REMOVED (dead-code cleanup): this file used to have its own inline
+// handlers for POST /api/smart-search, POST /api/toggle-bookmark,
+// GET /api/get-bookmarks/:userId, and POST /api/update-listing, registered
+// directly on `app` right here, BEFORE `app.use('/api', routes)` below.
+// Express matches whichever handler for a path is registered first, so
+// these four always ran instead of the versions of the same routes defined
+// in routes/index.js -> controllers/userController.js - making those four
+// controller functions permanently unreachable dead code, even though they
+// were kept updated in parallel the whole time.
 //
-// UPDATED: This used to be a plain SQL LIKE '%message%' match against the
-// WHOLE typed phrase, which meant a query like "house malapit sa eu" was
-// searched for as one literal string "house malapit sa eu" - something that
-// obviously never appears in any listing's text, so it almost always
-// returned zero results. It also completely ignored landlord/tenant role
-// scoping, so a landlord could see every user's listings through Smart
-// Search (inconsistent with the regular Browse view).
-//
-// Now it fetches all listings (with landlord info joined, same as the normal
-// /view endpoint) and hands them to the shared runSmartSearch() helper,
-// which strips Tagalog/English filler words ("malapit", "sa", "na", "may"),
-// translates common Taglish terms ("bahay" -> "house", "kwarto" -> "bedspace",
-// "parking"/"paradahan" -> "parking", "ketchen" -> "kitchen"), understands
-// price/room filters ("under 5000", "3 rooms"), and ranks results by how many
-// meaningful keywords actually matched.
-//
-// UPDATED AGAIN: the query now also pulls avg_rating and review_count per
-// listing via the same correlated subqueries used in userController.js's
-// getAllListings(), so Smart Search results carry the same star-average pill
-// and comment-count badge on their cards as the normal Browse view does -
-// previously these fields were just missing from Smart Search results,
-// which meant every card looked "New" until a normal Browse reload.
-app.post('/api/smart-search', (req, res) => {
-    const { message, userContext } = req.body;
-    const role = userContext?.role;
-    const userId = userContext?.id;
-
-    const query = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
-            COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
-            (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
-        FROM listings l
-        LEFT JOIN users u ON l.user_id = u.id
-    `;
-
-    db.query(query, (err, rows) => {
-        if (err) {
-            console.error("Smart Search Error:", err);
-            return res.status(500).json({ error: "Search failed" });
-        }
-
-        const results = runSmartSearch(message, rows, role, userId);
-        res.json({ results });
-    });
-});
-
-// --- NEW: BOOKMARK ENDPOINTS (Added directly to server.js for persistence) ---
-
-// 1. SAVE OR REMOVE BOOKMARK
-app.post('/api/toggle-bookmark', (req, res) => {
-    const { userId, listingId, action } = req.body;
-    
-    if (action === 'add') {
-        const query = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
-        db.query(query, [userId, listingId], (err, result) => {
-            // FIX: Error objects don't serialize their .message via JSON.stringify,
-            // so res.json(err) was silently sending "{}" to the frontend. Now we
-            // explicitly pull out the message so real DB errors are visible.
-            if (err) return res.status(500).json({ error: err.message, message: err.message });
-            res.json({ message: "Saved to database" });
-        });
-    } else {
-        const query = "DELETE FROM bookmarks WHERE user_id = ? AND listing_id = ?";
-        db.query(query, [userId, listingId], (err, result) => {
-            // FIX: same serialization issue as above.
-            if (err) return res.status(500).json({ error: err.message, message: err.message });
-            res.json({ message: "Removed from database" });
-        });
-    }
-});
-
-// 2. FETCH STORED BOOKMARKS ON LOGIN
-app.get('/api/get-bookmarks/:userId', (req, res) => {
-    const query = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
-    db.query(query, [req.params.userId], (err, results) => {
-        // FIX: same serialization issue as above.
-        if (err) return res.status(500).json({ error: err.message, message: err.message });
-        res.json(results);
-    });
-});
-
-// --- NEW: EDIT/UPDATE PROPERTY ENDPOINT ---
-// UPDATED: now also accepts/saves `status` ('available' | 'occupied') so
-// landlords can mark a listing as occupied/available from the Edit Listing
-// modal on home.html. Defaults to 'available' if not sent.
-app.post('/api/update-listing', (req, res) => {
-    // UPDATED: Added thumbnail and images to the destructuring to match home.js
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities, thumbnail, images, status } = req.body;
-    const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
-
-    // NEW: Friendly guard for oversized photo payloads. Managed MySQL hosts
-    // (like Clever Cloud's free tier) often cap max_allowed_packet well below
-    // our 50mb express body limit, so a very large combined image payload can
-    // fail at the DB layer. This gives a clear message instead of a silent
-    // crash. Adjust the 15 (MB) threshold if your DB plan allows more.
-    if (images) {
-        const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
-        if (approxSizeMB > 15) {
-            return res.status(413).json({
-                success: false,
-                message: `Your photos are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use fewer photos or smaller images.`
-            });
-        }
-    }
-
-    // UPDATED: The SQL now handles image updates if they are provided, plus status
-    const query = `
-        UPDATE listings 
-        SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=?, status=?,
-            thumbnail = COALESCE(?, thumbnail), 
-            images = COALESCE(?, images)
-        WHERE id=? AND user_id=?
-    `;
-
-    db.query(query, [title, category, price, location, rooms, size, amenities, finalStatus, thumbnail, images, listingId, user_id], (err, result) => {
-        if (err) {
-            console.error("Update Error:", err);
-            // FIX: Error objects don't serialize their .message via JSON.stringify,
-            // so res.json(err) was silently sending "{}" to the frontend and hiding
-            // the real reason (e.g. "Data too long for column 'images'" if the
-            // images/thumbnail columns are still TEXT instead of LONGTEXT).
-            return res.status(500).json({ error: err.message, message: err.message });
-        }
-        if (result.affectedRows === 0) {
-            return res.status(403).json({ message: "Unauthorized or listing not found" });
-        }
-        res.json({ success: true, message: "Listing updated successfully!" });
-    });
-});
+// All four now live in controllers/userController.js only (smartSearch,
+// toggleBookmark, getBookmarks, updateListing), reached through the routes
+// mounted below, same as every other endpoint in this app. Before removing
+// this inline version of update-listing, the controller's version was
+// missing the thumbnail/images COALESCE update and the oversized-payload
+// guard that this version had - both have been added there so nothing about
+// photo editing changed for the user.
 
 // USE ROUTES
 app.use('/api', routes);
