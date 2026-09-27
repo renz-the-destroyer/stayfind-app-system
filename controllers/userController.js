@@ -240,11 +240,25 @@ exports.updateProfile = (req, res) => {
 };
 
 // 7. GET ALL LISTINGS (Strict Landlord Filtering)
+// UPDATED: each row now also carries avg_rating and review_count, computed
+// with two correlated subqueries against the reviews table:
+//   - avg_rating: the mean of `rating` across rows that actually have a star
+//     rating (rating > 0), so text-only comments and landlord replies
+//     (rating = 0) never drag the average down. COALESCE'd to 0 for
+//     listings with no ratings yet.
+//   - review_count: the total number of rows in `reviews` for this listing
+//     (matches what the details modal already shows via revCount, which
+//     uses reviews.length from GET /get-reviews/:listing_id - comments and
+//     replies both count there too).
+// home.js's renderListings() reads these two fields to show the star-average
+// pill and comment-count badge on each card without any extra network calls.
 exports.getAllListings = (req, res) => {
     const { role, user_id } = req.query;
 
     let sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email 
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
+            COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
+            (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
         JOIN users u ON l.user_id = u.id`;
 
@@ -420,7 +434,9 @@ exports.smartSearch = (req, res) => {
     const { role, id: userId } = req.body.userContext || {}; 
 
     const sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
+            COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
+            (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
         LEFT JOIN users u ON l.user_id = u.id
     `;
