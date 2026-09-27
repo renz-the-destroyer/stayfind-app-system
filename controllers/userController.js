@@ -365,26 +365,43 @@ exports.deleteListing = (req, res) => {
 };
 
 // 12. UPDATE LISTING
-// NOTE: This function is currently NOT the one actually handling
-// POST /api/update-listing at runtime — server.js registers its own inline
-// handler for that exact path BEFORE `app.use('/api', routes)` is mounted,
-// so Express matches server.js's handler first and this one is effectively
-// unreachable dead code. Left in place and fixed anyway (per "do not remove
-// code") in case you later remove the inline handler in server.js and want
-// to route update-listing through this controller instead.
-// UPDATED: now also accepts/saves `status`, matching the live handler in
-// server.js, so this stays in sync if it's ever swapped back in.
+// UPDATED: this is now THE live handler for POST /api/update-listing. It
+// used to be shadowed by an inline handler registered directly on `app` in
+// server.js (Express matches whichever handler was registered first, and
+// that one was registered before `app.use('/api', routes)` mounted this
+// controller) - that duplicate has been removed from server.js so there is
+// only one place to maintain this logic going forward.
+// This version is brought up to full parity with what the removed inline
+// handler did, which this controller's version previously did NOT do:
+//   - accepts thumbnail/images and writes them with COALESCE(?, column) so
+//     a save that didn't pick new photos leaves the existing ones untouched
+//     (home.js sends null for these when nothing new was selected)
+//   - guards against an oversized combined photo payload (>15MB), same
+//     threshold used in addListing() above and in the removed inline handler
 exports.updateListing = (req, res) => {
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities, status } = req.body;
+    const { listingId, user_id, title, category, price, location, rooms, size, amenities, status, thumbnail, images } = req.body;
     const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
-    
-    const sql = `UPDATE listings SET title = ?, category = ?, price = ?, location = ?, rooms = ?, size = ?, amenities = ?, status = ? 
+
+    if (images) {
+        const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
+        if (approxSizeMB > 15) {
+            return res.status(413).json({
+                success: false,
+                message: `Your photos are too large combined (~${approxSizeMB.toFixed(1)}MB). Please use fewer photos or smaller images.`
+            });
+        }
+    }
+
+    const sql = `UPDATE listings 
+                 SET title = ?, category = ?, price = ?, location = ?, rooms = ?, size = ?, amenities = ?, status = ?,
+                     thumbnail = COALESCE(?, thumbnail),
+                     images = COALESCE(?, images)
                  WHERE id = ? AND user_id = ?`;
-    
-    db.query(sql, [title, category, price, location, rooms, size, amenities, finalStatus, listingId, user_id], (err, result) => {
+
+    db.query(sql, [title, category, price, location, rooms, size, amenities, finalStatus, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message, message: err.message });
         if (result.affectedRows > 0) {
-            res.json({ success: true, message: 'Listing updated successfully' });
+            res.json({ success: true, message: 'Listing updated successfully!' });
         } else {
             res.status(403).json({ success: false, message: 'Unauthorized or listing not found' });
         }
@@ -392,6 +409,9 @@ exports.updateListing = (req, res) => {
 };
 
 // 13. TOGGLE BOOKMARK
+// UPDATED: this is now THE live handler for POST /api/toggle-bookmark - the
+// inline duplicate registered directly on `app` in server.js has been
+// removed (same shadowing issue described on updateListing() above).
 exports.toggleBookmark = (req, res) => {
     const { userId, listingId, action } = req.body;
 
@@ -411,6 +431,8 @@ exports.toggleBookmark = (req, res) => {
 };
 
 // 14. GET BOOKMARKS
+// UPDATED: this is now THE live handler for GET /api/get-bookmarks/:id -
+// same shadowing issue as toggleBookmark() above, now resolved.
 exports.getBookmarks = (req, res) => {
     const userId = req.params.id;
     const sql = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
@@ -421,13 +443,13 @@ exports.getBookmarks = (req, res) => {
 };
 
 // 15. SMART SEARCH (Taglish-aware, with Role Security)
-// NOTE: Like updateListing() above, this is currently NOT the handler that
-// actually runs for POST /api/smart-search — server.js registers its own
-// inline handler for that exact path BEFORE app.use('/api', routes) is
-// mounted, so Express matches server.js's handler first. Both versions now
-// share the same parsing/scoring logic via utils/smartSearchLogic.js, so
-// they can't drift out of sync again. If you ever remove the inline handler
-// in server.js, this one is ready to take over unchanged.
+// UPDATED: this is now THE live handler for POST /api/smart-search, for the
+// same reason described on updateListing() above - the inline duplicate in
+// server.js that used to shadow this has been removed. Shares its parsing/
+// scoring logic with the old inline version via utils/smartSearchLogic.js
+// (they were kept in sync even while this one was dead code), and also
+// carries the avg_rating/review_count subqueries so Smart Search cards get
+// the same star-average pill as the normal Browse view.
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
     // Access user info from the request (sent from frontend)
