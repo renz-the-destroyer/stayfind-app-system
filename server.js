@@ -41,13 +41,22 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // "parking"/"paradahan" -> "parking", "ketchen" -> "kitchen"), understands
 // price/room filters ("under 5000", "3 rooms"), and ranks results by how many
 // meaningful keywords actually matched.
+//
+// UPDATED AGAIN: the query now also pulls avg_rating and review_count per
+// listing via the same correlated subqueries used in userController.js's
+// getAllListings(), so Smart Search results carry the same star-average pill
+// and comment-count badge on their cards as the normal Browse view does -
+// previously these fields were just missing from Smart Search results,
+// which meant every card looked "New" until a normal Browse reload.
 app.post('/api/smart-search', (req, res) => {
     const { message, userContext } = req.body;
     const role = userContext?.role;
     const userId = userContext?.id;
 
     const query = `
-        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email
+        SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
+            COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
+            (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l
         LEFT JOIN users u ON l.user_id = u.id
     `;
