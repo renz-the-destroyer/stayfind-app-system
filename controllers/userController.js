@@ -239,9 +239,9 @@ exports.updateProfile = (req, res) => {
     });
 };
 
-// 7. GET ALL LISTINGS (Strict Landlord Filtering)
-// UPDATED: each row now also carries avg_rating and review_count, computed
-// with two correlated subqueries against the reviews table:
+// 7. GET ALL LISTINGS (Strict Landlord Filtering + Pagination)
+// UPDATED: each row still carries avg_rating and review_count via the same
+// two correlated subqueries as before:
 //   - avg_rating: the mean of `rating` across rows that actually have a star
 //     rating (rating > 0), so text-only comments and landlord replies
 //     (rating = 0) never drag the average down. COALESCE'd to 0 for
@@ -250,31 +250,69 @@ exports.updateProfile = (req, res) => {
 //     (matches what the details modal already shows via revCount, which
 //     uses reviews.length from GET /get-reviews/:listing_id - comments and
 //     replies both count there too).
-// home.js's renderListings() reads these two fields to show the star-average
-// pill and comment-count badge on each card without any extra network calls.
+//
+// NEW: this endpoint used to return every matching listing - with every
+// embedded base64 photo - in a single response, which gets slow and heavy
+// as the listings table grows. It now paginates via `page`/`limit` query
+// params (defaults: page=1, limit=12, capped at 48/page) and always
+// responds with { listings, page, limit, total, totalPages, hasMore }
+// instead of a bare array, so home.js can show a "Load More" control and
+// know when it's reached the end.
+//
+// Pass `all=true` to skip pagination and get every matching listing back in
+// one response (still shaped the same way, with totalPages: 1). home.js
+// uses this for the Saved view and anywhere else that needs the complete
+// list in memory to filter correctly - paginating those would mean a saved
+// listing on page 2 silently not showing up until "Load More" was clicked.
 exports.getAllListings = (req, res) => {
-    const { role, user_id } = req.query;
+    const { role, user_id, page, limit, all } = req.query;
 
-    let sql = `
+    let whereClause = '';
+    let whereParams = [];
+
+    // Filter logic: If role is landlord, they ONLY see listings where they are the owner
+    if (role === 'landlord' && user_id) {
+        whereClause = ' WHERE l.user_id = ?';
+        whereParams.push(user_id);
+    }
+
+    const baseSelect = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
             COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
             (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
-        JOIN users u ON l.user_id = u.id`;
+        JOIN users u ON l.user_id = u.id${whereClause}
+        ORDER BY l.created_at DESC`;
 
-    let queryParams = [];
-
-    // Filter logic: If role is landlord, they ONLY see listings where they are the owner
-    if (role === 'landlord' && user_id) {
-        sql += ` WHERE l.user_id = ?`;
-        queryParams.push(user_id);
+    if (all === 'true') {
+        db.query(baseSelect, whereParams, (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({ listings: rows, page: 1, limit: rows.length, total: rows.length, totalPages: 1, hasMore: false });
+        });
+        return;
     }
 
-    sql += ` ORDER BY l.created_at DESC`;
-        
-    db.query(sql, queryParams, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const pageSize = Math.min(48, Math.max(1, parseInt(limit) || 12));
+    const offset = (pageNum - 1) * pageSize;
+
+    const countSql = `SELECT COUNT(*) AS total FROM listings l${whereClause}`;
+    db.query(countSql, whereParams, (countErr, countRows) => {
+        if (countErr) return res.status(500).json({ error: countErr.message });
+        const total = countRows[0].total;
+
+        const sql = `${baseSelect} LIMIT ? OFFSET ?`;
+        db.query(sql, [...whereParams, pageSize, offset], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json({
+                listings: rows,
+                page: pageNum,
+                limit: pageSize,
+                total,
+                totalPages: Math.max(1, Math.ceil(total / pageSize)),
+                hasMore: offset + rows.length < total
+            });
+        });
     });
 };
 
