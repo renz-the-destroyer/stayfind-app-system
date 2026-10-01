@@ -358,16 +358,26 @@ exports.addListing = (req, res) => {
 };
 
 // 9. ADD REVIEW (Supports Landlord Replies)
+// UPDATED: now also accepts/saves `parent_review_id` so a landlord's reply
+// is properly linked to the specific tenant review it answers, instead of
+// just being marked is_reply=1 and relying on created_at ordering to land
+// near the right comment. Requires a one-time migration on the `reviews`
+// table (safe to run even with existing rows - it just adds a nullable
+// column):
+//   ALTER TABLE reviews ADD COLUMN parent_review_id INT NULL DEFAULT NULL;
+// A plain tenant review/comment sends no parent_review_id (stored as NULL);
+// home.js's loadComments() groups replies under their parent client-side.
 exports.addReview = (req, res) => {
-    const { listing_id, user_id, user_name, comment, rating, is_reply } = req.body;
-    
+    const { listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id } = req.body;
+
     // rating is 0 if it's a landlord reply
     const finalRating = is_reply ? 0 : (rating || 0);
     const finalReplyStatus = is_reply ? 1 : 0;
+    const finalParentId = is_reply && parent_review_id ? parent_review_id : null;
 
-    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply) VALUES (?, ?, ?, ?, ?, ?)`;
-    
-    db.query(sql, [listing_id, user_id, user_name, comment, finalRating, finalReplyStatus], (err, result) => {
+    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+
+    db.query(sql, [listing_id, user_id, user_name, comment, finalRating, finalReplyStatus, finalParentId], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
     });
