@@ -54,4 +54,13 @@ router.get('/get-bookmarks/:id', userController.getBookmarks);
 // Handles natural language like "3 rooms" or "house under 5000"
 router.post('/smart-search', userController.smartSearch);
 
+// --- 10. MESSAGING SYSTEM (NEW) ---
+// Tenant <-> landlord direct messages. See the big comment block above
+// exports.startConversation in controllers/userController.js for the two
+// new tables this needs (conversations, messages).
+router.post('/conversations/start', userController.startConversation);
+router.get('/conversations/:userId', userController.getConversations);
+router.get('/messages/:conversationId', userController.getMessages);
+router.post('/messages/send', userController.sendMessage);
+
 module.exports = router;
