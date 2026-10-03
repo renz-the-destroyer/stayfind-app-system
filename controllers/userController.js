@@ -519,3 +519,152 @@ exports.smartSearch = (req, res) => {
         res.json({ success: true, results: finalResults });
     });
 };
+
+// ============================================================================
+// 16. MESSAGING SYSTEM (NEW) — tenant <-> landlord direct messages
+// ============================================================================
+// Requires two new tables. Run once on your MySQL database (same pattern as
+// the earlier LONGTEXT/parent_review_id migrations):
+//
+//   CREATE TABLE conversations (
+//     id INT AUTO_INCREMENT PRIMARY KEY,
+//     listing_id INT NOT NULL,
+//     tenant_id INT NOT NULL,
+//     landlord_id INT NOT NULL,
+//     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//     last_message_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//     UNIQUE KEY unique_thread (listing_id, tenant_id, landlord_id)
+//   );
+//
+//   CREATE TABLE messages (
+//     id INT AUTO_INCREMENT PRIMARY KEY,
+//     conversation_id INT NOT NULL,
+//     sender_id INT NOT NULL,
+//     message TEXT NOT NULL,
+//     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+//     is_read TINYINT(1) DEFAULT 0
+//   );
+//
+// A "conversation" is uniquely identified by (listing_id, tenant_id,
+// landlord_id) - the UNIQUE KEY means the same tenant messaging the same
+// landlord about the same listing always lands in the same thread, even if
+// they click "Message Landlord" from that listing more than once.
+
+// 16a. START (OR RESUME) A CONVERSATION
+// Called when a tenant taps "Message Landlord" on a listing. Looks for an
+// existing thread for this exact (listing, tenant, landlord) triple first,
+// and only creates a new one if none exists - this is what the UNIQUE KEY
+// above is for, so a tenant messaging the same landlord twice about the same
+// listing always reopens the same conversation instead of fragmenting it.
+exports.startConversation = (req, res) => {
+    const { listing_id, tenant_id, landlord_id } = req.body;
+
+    if (!listing_id || !tenant_id || !landlord_id) {
+        return res.status(400).json({ success: false, message: 'listing_id, tenant_id, and landlord_id are all required.' });
+    }
+    if (String(tenant_id) === String(landlord_id)) {
+        return res.status(400).json({ success: false, message: "You can't message yourself about your own listing." });
+    }
+
+    const findSql = `SELECT id FROM conversations WHERE listing_id = ? AND tenant_id = ? AND landlord_id = ?`;
+    db.query(findSql, [listing_id, tenant_id, landlord_id], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        if (rows.length > 0) {
+            return res.json({ success: true, conversation_id: rows[0].id });
+        }
+
+        const insertSql = `INSERT INTO conversations (listing_id, tenant_id, landlord_id) VALUES (?, ?, ?)`;
+        db.query(insertSql, [listing_id, tenant_id, landlord_id], (insertErr, result) => {
+            // ER_DUP_ENTRY can happen if two requests race (e.g. a double
+            // click) and both try to create the same thread - fall back to
+            // looking it up instead of failing the request.
+            if (insertErr && insertErr.code === 'ER_DUP_ENTRY') {
+                return db.query(findSql, [listing_id, tenant_id, landlord_id], (raceErr, raceRows) => {
+                    if (raceErr) return res.status(500).json({ error: raceErr.message });
+                    return res.json({ success: true, conversation_id: raceRows[0].id });
+                });
+            }
+            if (insertErr) return res.status(500).json({ error: insertErr.message });
+            res.json({ success: true, conversation_id: result.insertId });
+        });
+    });
+};
+
+// 16b. LIST A USER'S CONVERSATIONS (their Messages inbox)
+// A user can show up as either the tenant or the landlord side of a thread
+// depending on which listing it's about, so the CASE expressions below pick
+// out "the other person" and their name relative to whoever is asking.
+// Each row also carries the most recent message (as a preview) and how many
+// unread messages this user specifically has waiting, via two correlated
+// subqueries - same pattern as avg_rating/review_count on listings.
+exports.getConversations = (req, res) => {
+    const userId = req.params.userId;
+
+    const sql = `
+        SELECT c.*,
+            l.title AS listing_title,
+            l.thumbnail AS listing_thumbnail,
+            CASE WHEN c.tenant_id = ? THEN c.landlord_id ELSE c.tenant_id END AS other_user_id,
+            CASE WHEN c.tenant_id = ? THEN landlord.full_name ELSE tenant.full_name END AS other_user_name,
+            (SELECT m.message FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC LIMIT 1) AS last_message,
+            (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id AND m.sender_id != ? AND m.is_read = 0) AS unread_count
+        FROM conversations c
+        JOIN listings l ON c.listing_id = l.id
+        JOIN users tenant ON c.tenant_id = tenant.id
+        JOIN users landlord ON c.landlord_id = landlord.id
+        WHERE c.tenant_id = ? OR c.landlord_id = ?
+        ORDER BY c.last_message_at DESC
+    `;
+
+    db.query(sql, [userId, userId, userId, userId, userId], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// 16c. GET MESSAGES IN A CONVERSATION
+// Pass ?user_id=<viewer> so this can mark every message NOT sent by the
+// viewer as read - that's what clears the unread badge/count for them.
+// Marking-as-read happens after the fetch so the response itself isn't
+// affected by it (the viewer still sees exactly what was in the thread at
+// the moment they opened it).
+exports.getMessages = (req, res) => {
+    const conversationId = req.params.conversationId;
+    const viewerId = req.query.user_id;
+
+    const sql = `SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`;
+    db.query(sql, [conversationId], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        if (viewerId) {
+            const markReadSql = `UPDATE messages SET is_read = 1 WHERE conversation_id = ? AND sender_id != ? AND is_read = 0`;
+            db.query(markReadSql, [conversationId, viewerId], () => { /* best-effort - the message list already went out */ });
+        }
+
+        res.json(rows);
+    });
+};
+
+// 16d. SEND A MESSAGE
+exports.sendMessage = (req, res) => {
+    const { conversation_id, sender_id, message } = req.body;
+    const trimmed = (message || '').trim();
+
+    if (!conversation_id || !sender_id || !trimmed) {
+        return res.status(400).json({ success: false, message: 'conversation_id, sender_id, and a non-empty message are required.' });
+    }
+
+    const insertSql = `INSERT INTO messages (conversation_id, sender_id, message) VALUES (?, ?, ?)`;
+    db.query(insertSql, [conversation_id, sender_id, trimmed], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+
+        db.query(`UPDATE conversations SET last_message_at = NOW() WHERE id = ?`, [conversation_id], () => { /* best-effort */ });
+
+        res.json({
+            success: true,
+            message_id: result.insertId,
+            created_at: new Date().toISOString()
+        });
+    });
+};
