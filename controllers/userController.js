@@ -2,6 +2,9 @@ const db = require('../config/db');
 // NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
 // Used here AND in server.js so both stay in sync.
 const { runSmartSearch } = require('../utils/smartSearchLogic');
+// NEW: in-memory cache for GET /api/view - see utils/listingsCache.js for
+// the full explanation of the TTL + clear-on-write strategy.
+const listingsCache = require('../utils/listingsCache');
 
 // 1. GET ALL USERS (Used for Login)
 exports.getAllUsers = (req, res) => {
@@ -267,6 +270,12 @@ exports.updateProfile = (req, res) => {
 exports.getAllListings = (req, res) => {
     const { role, user_id, page, limit, all } = req.query;
 
+    // NEW: serve straight from the in-memory cache when there's a fresh
+    // entry for this exact combination of role/user_id/page/limit/all - no
+    // DB round trip at all for a cache hit.
+    const cached = listingsCache.get(req.query);
+    if (cached) return res.json(cached);
+
     let whereClause = '';
     let whereParams = [];
 
@@ -287,7 +296,9 @@ exports.getAllListings = (req, res) => {
     if (all === 'true') {
         db.query(baseSelect, whereParams, (err, rows) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({ listings: rows, page: 1, limit: rows.length, total: rows.length, totalPages: 1, hasMore: false });
+            const payload = { listings: rows, page: 1, limit: rows.length, total: rows.length, totalPages: 1, hasMore: false };
+            listingsCache.set(req.query, payload); // NEW
+            res.json(payload);
         });
         return;
     }
@@ -304,14 +315,16 @@ exports.getAllListings = (req, res) => {
         const sql = `${baseSelect} LIMIT ? OFFSET ?`;
         db.query(sql, [...whereParams, pageSize, offset], (err, rows) => {
             if (err) return res.status(500).json({ error: err.message });
-            res.json({
+            const payload = {
                 listings: rows,
                 page: pageNum,
                 limit: pageSize,
                 total,
                 totalPages: Math.max(1, Math.ceil(total / pageSize)),
                 hasMore: offset + rows.length < total
-            });
+            };
+            listingsCache.set(req.query, payload); // NEW
+            res.json(payload);
         });
     });
 };
@@ -353,6 +366,7 @@ exports.addListing = (req, res) => {
         // LONGTEXT) was silently swallowed and the user only saw a generic
         // "Failed to post" alert.
         if (err) return res.status(500).json({ success: false, error: err.message, message: err.message });
+        listingsCache.clear(); // NEW: a new listing exists now - don't let a cached /api/view hide it
         res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
     });
 };
@@ -379,6 +393,7 @@ exports.addReview = (req, res) => {
 
     db.query(sql, [listing_id, user_id, user_name, comment, finalRating, finalReplyStatus, finalParentId], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
+        listingsCache.clear(); // NEW: this review/reply changes the listing's avg_rating/review_count
         res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
     });
 };
@@ -405,6 +420,7 @@ exports.deleteListing = (req, res) => {
     db.query(sql, [listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows > 0) {
+            listingsCache.clear(); // NEW: this listing no longer exists - don't let a cached /api/view keep showing it
             res.json({ success: true, message: 'Listing deleted successfully' });
         } else {
             res.status(403).json({ success: false, message: 'Unauthorized or Listing not found' });
@@ -449,6 +465,7 @@ exports.updateListing = (req, res) => {
     db.query(sql, [title, category, price, location, rooms, size, amenities, finalStatus, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message, message: err.message });
         if (result.affectedRows > 0) {
+            listingsCache.clear(); // NEW: price/photos/status etc. just changed - don't serve a stale cached version
             res.json({ success: true, message: 'Listing updated successfully!' });
         } else {
             res.status(403).json({ success: false, message: 'Unauthorized or listing not found' });
