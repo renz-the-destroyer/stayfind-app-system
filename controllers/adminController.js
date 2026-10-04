@@ -1,4 +1,9 @@
 const db = require('../config/db');
+// NEW: same in-memory /api/view cache used by userController.js - admin
+// edits/deletes bypass userController.js entirely, so without clearing it
+// here too, an admin fixing a listing's price (for example) wouldn't show
+// up on the public Browse view until the cache's TTL expired on its own.
+const listingsCache = require('../utils/listingsCache');
 
 // --- ADMIN LOGIN ---
 // UPDATED: now checks the `admins` DB table instead of the single
@@ -149,6 +154,7 @@ exports.updateListingAdmin = (req, res) => {
     db.query(sql, [title, category, price, location, rooms, size, amenities, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
+        listingsCache.clear(); // NEW: keep the public Browse view in sync with this admin edit
         res.json({ success: true, message: 'Listing updated successfully' });
     });
 };
@@ -159,6 +165,7 @@ exports.deleteListingAdmin = (req, res) => {
     db.query('DELETE FROM listings WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
+        listingsCache.clear(); // NEW: don't let a cached /api/view keep showing a listing an admin just removed
         res.json({ success: true, message: 'Listing deleted successfully' });
     });
 };
@@ -178,6 +185,7 @@ exports.deleteReviewAdmin = (req, res) => {
     db.query('DELETE FROM reviews WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Review not found' });
+        listingsCache.clear(); // NEW: a deleted review can change the listing's avg_rating/review_count
         res.json({ success: true, message: 'Review deleted successfully' });
     });
 };
