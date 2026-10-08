@@ -1,16 +1,13 @@
 // utils/smartSearchLogic.js
 //
 // Shared "Smart Search" query parser + matcher, used by BOTH:
-//  - server.js's inline POST /api/smart-search handler (this is the one that
-//    actually runs right now, since it's registered on `app` BEFORE
-//    `app.use('/api', routes)` is mounted)
-//  - controllers/userController.js's smartSearch export (currently dormant/
-//    unreachable for the same reason, but kept in sync here so it's ready to
-//    go if the inline handler in server.js is ever removed)
+//  - controllers/userController.js's smartSearch export (POST /api/smart-search)
+//  - controllers/searchController.js's smartSearchSuggestions export
+//    (POST /api/smart-search/suggestions) - NEW, powers the zero-result nudge
 //
-// Exported functions are UNCHANGED from before (parseSmartSearchQuery,
-// runSmartSearch), so server.js and controllers/userController.js do NOT
-// need any changes to use this upgraded version.
+// Exported functions: parseSmartSearchQuery and runSmartSearch keep the exact
+// same signatures as before, so userController.js needs NO changes.
+// NEW export: suggestFallbacks(rawQuery, rows, role, userId).
 //
 // ============================================================================
 // WHAT THIS UNDERSTANDS NOW
@@ -25,6 +22,14 @@
 //   "3 bedrooms with parking"    -> rooms >= 3, has parking
 //   "30 sqm condo"               -> size >= 30, category = Condo
 //   "aparment na may wefi"       -> typos auto-corrected to apartment/wifi
+//
+// FIXED in this version: the price / room / size phrases ("under 5000",
+// "3 bedrooms", "30 sqm") used to be parsed into filters but their leftover
+// words ("under", "bedrooms", "sqm") were ALSO kept as keywords. Since no
+// listing contains the word "under" or "sqm", queries like "house under 5000"
+// or "30 sqm condo" returned zero results even when matching listings
+// existed. The matched phrases are now removed from the text before it is
+// split into keywords.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
@@ -46,7 +51,12 @@ const STOPWORDS = new Set([
     'the', 'a', 'an', 'in', 'for', 'of', 'to', 'with', 'near', 'is', 'are', 'that', 'has',
     // Conversational filler ("can you show me a house...", "I need an apartment...")
     'can', 'you', 'show', 'me', 'find', 'looking', 'need', 'want', 'give', 'get',
-    'search', 'searching', 'please', 'pls', 'there', 'any', 'some', 'i', 'im', "i'm"
+    'search', 'searching', 'please', 'pls', 'there', 'any', 'some', 'i', 'im', "i'm",
+    // NEW: price/size comparison leftovers + generic nouns that are never
+    // a meaningful thing to match against a listing's text
+    'under', 'below', 'above', 'over', 'less', 'than', 'more', 'higher', 'hanggang',
+    'pababa', 'pataas', 'or', 'and', 'php', 'sqm',
+    'room', 'rooms', 'unit', 'place', 'property', 'stay', 'stays', 'rent', 'rental', 'upa'
 ]);
 
 // ---------------------------------------------------------------------------
@@ -150,6 +160,11 @@ function fuzzyCorrect(word) {
 function parseSmartSearchQuery(rawQuery) {
     const lowerQuery = (rawQuery || "").toLowerCase().trim();
 
+    // NEW: working copy of the query. Every phrase that gets turned into a
+    // filter below (price / rooms / size) is cut out of this copy, so its
+    // leftover words never get mistaken for keywords later on.
+    let working = lowerQuery;
+
     // --- PRICE FILTERS: "under 5000", "below ₱5k", "5k pababa", "over 3000" ---
     let maxPrice = null, minPrice = null;
 
@@ -158,6 +173,7 @@ function parseSmartSearchQuery(rawQuery) {
         lowerQuery.match(/([\d,]+)(k)?\s*(?:pababa|or less|and below)/);
     if (underMatch) {
         maxPrice = parseInt(underMatch[1].replace(/,/g, ''), 10) * (underMatch[2] ? 1000 : 1);
+        working = working.replace(underMatch[0], ' ');
     }
 
     const overMatch =
@@ -165,6 +181,7 @@ function parseSmartSearchQuery(rawQuery) {
         lowerQuery.match(/([\d,]+)(k)?\s*(?:pataas|or more|and above)/);
     if (overMatch) {
         minPrice = parseInt(overMatch[1].replace(/,/g, ''), 10) * (overMatch[2] ? 1000 : 1);
+        working = working.replace(overMatch[0], ' ');
     }
 
     // --- ROOM COUNT FILTER: "3 rooms", "2 bedrooms", "3 kwarto" ---
@@ -172,6 +189,7 @@ function parseSmartSearchQuery(rawQuery) {
     const roomMatch = lowerQuery.match(/(\d+)\s*(?:rooms?|bedrooms?|kwarto|kuarto)/);
     if (roomMatch) {
         minRooms = parseInt(roomMatch[1], 10);
+        working = working.replace(roomMatch[0], ' ');
     }
 
     // --- SIZE FILTER: "30 sqm", "at least 25 sq m", "30 square meters" ---
@@ -179,10 +197,11 @@ function parseSmartSearchQuery(rawQuery) {
     const sizeMatch = lowerQuery.match(/(\d+)\s*(?:sqm|sq\.?\s?m\.?|square\s?meters?)/);
     if (sizeMatch) {
         minSize = parseInt(sizeMatch[1], 10);
+        working = working.replace(sizeMatch[0], ' ');
     }
 
-    // --- TOKENIZE ---
-    const rawWords = lowerQuery.split(/\s+/).filter(w => w.length > 1);
+    // --- TOKENIZE (from the cleaned-up working copy, not the raw query) ---
+    const rawWords = working.split(/\s+/).filter(w => w.length > 1);
 
     // --- PROPERTY TYPE: pulled out as a hard filter, not a soft keyword ---
     let categoryFilter = null;
@@ -219,13 +238,18 @@ function parseSmartSearchQuery(rawQuery) {
 
 // ---------------------------------------------------------------------------
 // 7. MATCHER + RANKER
-// Filters rows against the parsed query, scores each surviving row by
+// Filters rows against an ALREADY-PARSED query, scores each surviving row by
 // weighted relevance (title matches count more than amenities, which count
 // more than location), then sorts - either by the detected sort intent
 // (cheapest/biggest/etc.) or by relevance score.
+//
+// NEW: this used to live inline inside runSmartSearch(). It was split out so
+// suggestFallbacks() below can re-run the same matching logic against
+// "relaxed" versions of a parsed query (e.g. the same search without the
+// price limit) without duplicating any of it.
 // ---------------------------------------------------------------------------
-function runSmartSearch(rawQuery, rows, role, userId) {
-    const { maxPrice, minPrice, minRooms, minSize, categoryFilter, sortBy, keywords } = parseSmartSearchQuery(rawQuery);
+function applyParsedSearch(parsed, rows, role, userId) {
+    const { maxPrice, minPrice, minRooms, minSize, categoryFilter, sortBy, keywords } = parsed;
 
     // Nothing usable in the query at all (only filler words, no filters/intent)
     if (
@@ -283,4 +307,86 @@ function runSmartSearch(rawQuery, rows, role, userId) {
     return scored.map(s => s.row);
 }
 
-module.exports = { parseSmartSearchQuery, runSmartSearch };
+// Same signature and behavior as before - parse, then match.
+function runSmartSearch(rawQuery, rows, role, userId) {
+    return applyParsedSearch(parseSmartSearchQuery(rawQuery), rows, role, userId);
+}
+
+// ---------------------------------------------------------------------------
+// 8. ZERO-RESULT FALLBACKS (NEW)
+// When a query finds nothing, this works out WHICH part of it was too strict
+// by re-running it with one constraint loosened at a time. It only returns
+// loosened versions that actually find something, each with:
+//   - label: short text for the button the person sees
+//   - query: a plain-text query the frontend can send straight back to
+//            POST /api/smart-search (rebuilt from the loosened filters)
+//   - count: how many stays that loosened search finds
+// At most 3 are returned, ordered from "loosest change" to "biggest change".
+// ---------------------------------------------------------------------------
+function buildQueryFromParsed(p) {
+    const parts = [];
+    if (p.sortBy === 'price_asc') parts.push('cheapest');
+    if (p.sortBy === 'price_desc') parts.push('mahal');
+    if (p.sortBy === 'size_desc') parts.push('biggest');
+    if (p.categoryFilter) parts.push(p.categoryFilter);
+    // "pet friendly" has a space, but the parser splits on spaces - the
+    // joined form "petfriendly" maps back to it through SYNONYMS.
+    p.keywords.forEach(k => parts.push(k.replace(/\s+/g, '')));
+    if (p.maxPrice !== null) parts.push(`under ${p.maxPrice}`);
+    if (p.minPrice !== null) parts.push(`over ${p.minPrice}`);
+    if (p.minRooms !== null) parts.push(`${p.minRooms} rooms`);
+    if (p.minSize !== null) parts.push(`${p.minSize} sqm`);
+    return parts.join(' ');
+}
+
+function suggestFallbacks(rawQuery, rows, role, userId) {
+    const parsed = parseSmartSearchQuery(rawQuery);
+    const variants = [];
+
+    const hasPrice = parsed.maxPrice !== null || parsed.minPrice !== null;
+    const hasRooms = parsed.minRooms !== null;
+    const hasSize = parsed.minSize !== null;
+    const hasKeywords = parsed.keywords.length > 0;
+    const hasCategory = !!parsed.categoryFilter;
+
+    if (hasPrice) {
+        const budget = parsed.maxPrice !== null ? ` (over ₱${parsed.maxPrice.toLocaleString()})` : '';
+        variants.push({ label: `Ignore the price limit${budget}`, patch: { maxPrice: null, minPrice: null } });
+    }
+    if (hasRooms) variants.push({ label: 'Any number of rooms', patch: { minRooms: null } });
+    if (hasSize) variants.push({ label: 'Any size', patch: { minSize: null } });
+    if (hasKeywords && (hasCategory || hasPrice || hasRooms || hasSize)) {
+        variants.push({ label: `Skip "${parsed.keywords.join(', ')}"`, patch: { keywords: [] } });
+    }
+    if (hasCategory && hasKeywords) {
+        variants.push({ label: 'Any property type', patch: { categoryFilter: null } });
+    }
+
+    // Last resort: when several things are set, keep only the property type.
+    const constraintCount = [hasPrice, hasRooms, hasSize, hasKeywords].filter(Boolean).length;
+    if (hasCategory && constraintCount >= 2) {
+        variants.push({
+            label: `Just show ${parsed.categoryFilter}s`,
+            patch: { maxPrice: null, minPrice: null, minRooms: null, minSize: null, keywords: [] }
+        });
+    }
+
+    const seenQueries = new Set();
+    const suggestions = [];
+    for (const variant of variants) {
+        const relaxed = { ...parsed, ...variant.patch };
+        const query = buildQueryFromParsed(relaxed);
+        if (!query || seenQueries.has(query)) continue;
+
+        const found = applyParsedSearch(relaxed, rows, role, userId);
+        if (found.length === 0) continue;
+
+        seenQueries.add(query);
+        suggestions.push({ label: variant.label, query, count: found.length });
+        if (suggestions.length >= 3) break;
+    }
+
+    return suggestions;
+}
+
+module.exports = { parseSmartSearchQuery, runSmartSearch, suggestFallbacks };
