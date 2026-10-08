@@ -35,6 +35,7 @@ exports.updateUser = (req, res) => {
     db.query(sql, [full_name, email, role, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows > 0) {
+            listingsCache.clear(); // NEW: landlord_name shown on cached listings may have just changed
             res.json({ success: true, message: 'User Updated Successfully' });
         } else {
             res.status(404).json({ message: 'User not found' });
@@ -48,6 +49,7 @@ exports.deleteUser = (req, res) => {
     db.query('DELETE FROM users WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows > 0) {
+            listingsCache.clear(); // NEW: this user's listings may no longer appear in /api/view
             res.json({ success: true, message: 'User Deleted Successfully' });
         } else {
             res.status(404).json({ message: 'User not found' });
@@ -216,6 +218,10 @@ exports.updateProfile = (req, res) => {
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
 
+            // NEW: the landlord's name/contact/status are shown on every one
+            // of their cached listings, so drop the cache after a profile save.
+            listingsCache.clear();
+
             // NEW: build a message that also tells the user if their
             // personal-info edits were skipped this time because of the lock,
             // so they aren't confused about why their retyped address/contact
@@ -267,6 +273,11 @@ exports.updateProfile = (req, res) => {
 // uses this for the Saved view and anywhere else that needs the complete
 // list in memory to filter correctly - paginating those would mean a saved
 // listing on page 2 silently not showing up until "Load More" was clicked.
+//
+// NEW (verified badge): rows now also carry u.landlord_status. home.js's
+// buildVerifiedBadgeHTML() reads item.landlord_status to decide whether to
+// show the "Verified" badge, but this query never selected that column, so
+// the badge could never appear.
 exports.getAllListings = (req, res) => {
     const { role, user_id, page, limit, all } = req.query;
 
@@ -287,6 +298,7 @@ exports.getAllListings = (req, res) => {
 
     const baseSelect = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
+            u.landlord_status AS landlord_status,
             COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
             (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
@@ -515,6 +527,8 @@ exports.getBookmarks = (req, res) => {
 // (they were kept in sync even while this one was dead code), and also
 // carries the avg_rating/review_count subqueries so Smart Search cards get
 // the same star-average pill as the normal Browse view.
+// NEW (verified badge): also selects u.landlord_status so Smart Search
+// result cards can show the Verified badge too.
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
     // Access user info from the request (sent from frontend)
@@ -522,6 +536,7 @@ exports.smartSearch = (req, res) => {
 
     const sql = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
+            u.landlord_status AS landlord_status,
             COALESCE((SELECT AVG(r.rating) FROM reviews r WHERE r.listing_id = l.id AND r.rating > 0), 0) AS avg_rating,
             (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
