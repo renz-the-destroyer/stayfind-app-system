@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const userController = require('../controllers/userController');
+// NEW: zero-result Smart Search suggestions
+const searchController = require('../controllers/searchController');
 
 // --- 1. API HEALTH CHECK ---
 // You can visit https://stayfind-app-system.onrender.com/api/test to see if it's working
@@ -53,6 +55,10 @@ router.get('/get-bookmarks/:id', userController.getBookmarks);
 // --- 9. SMART SEARCH SYSTEM (NEW) ---
 // Handles natural language like "3 rooms" or "house under 5000"
 router.post('/smart-search', userController.smartSearch);
+
+// NEW: when a Smart Search finds nothing, the frontend asks this endpoint
+// which loosened versions of the query WOULD find something.
+router.post('/smart-search/suggestions', searchController.smartSearchSuggestions);
 
 // --- 10. MESSAGING SYSTEM (NEW) ---
 // Tenant <-> landlord direct messages. See the big comment block above
