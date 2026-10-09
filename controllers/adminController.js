@@ -1,15 +1,14 @@
 const db = require('../config/db');
-// NEW: same in-memory /api/view cache used by userController.js - admin
+// Same in-memory /api/view cache used by userController.js - admin
 // edits/deletes bypass userController.js entirely, so without clearing it
 // here too, an admin fixing a listing's price (for example) wouldn't show
 // up on the public Browse view until the cache's TTL expired on its own.
 const listingsCache = require('../utils/listingsCache');
 
 // --- ADMIN LOGIN ---
-// UPDATED: now checks the `admins` DB table instead of the single
-// ADMIN_EMAIL/ADMIN_PASSWORD pair in .env, so multiple admin accounts can
-// exist and log in independently. ADMIN_KEY is still the shared secret
-// returned on success and required on every other admin route (unchanged).
+// Checks the `admins` DB table so multiple admin accounts can exist and log
+// in independently. ADMIN_KEY is still the shared secret returned on success
+// and required on every other admin route.
 exports.adminLogin = (req, res) => {
     const { email, password } = req.body;
 
@@ -63,12 +62,10 @@ exports.getAllUsersAdmin = (req, res) => {
 };
 
 // --- USERS: PENDING LANDLORD REQUESTS ---
-// UPDATED: now also selects landlord_doc_name — the name the applicant typed
-// as "printed on their Proof of Ownership document" during signup/settings.
-// admin.js uses this alongside the user's registered full_name to render a
-// Match / Mismatch / No name given badge in the Landlord Requests table, so
-// the admin can spot obvious name mismatches at a glance before even opening
-// the document viewer.
+// Also selects landlord_doc_name - the name the applicant typed as "printed
+// on their Proof of Ownership document". admin.js uses this alongside the
+// user's registered full_name to render a Match / Mismatch / No name given
+// badge in the Landlord Requests table.
 exports.getLandlordRequests = (req, res) => {
     const sql = `SELECT id, full_name, email, contact, address, landlord_documents, landlord_doc_name FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
     db.query(sql, (err, rows) => {
@@ -85,15 +82,14 @@ exports.approveLandlord = (req, res) => {
     db.query(sql, [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        listingsCache.clear(); // NEW: landlord_status (Verified badge) is shown on cached listings
         res.json({ success: true, message: 'Landlord request approved' });
     });
 };
 
 // --- USERS: REJECT LANDLORD REQUEST ---
-// NOTE: unchanged — still just accepts whatever string is passed as `reason`
-// in the request body. admin.js now builds that string from a template
-// picker (or custom text) before calling this endpoint, but this controller
-// doesn't need to know or care where the string came from.
+// Accepts whatever string is passed as `reason` in the request body.
+// admin.js builds that string from a template picker (or custom text).
 exports.rejectLandlord = (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -103,6 +99,7 @@ exports.rejectLandlord = (req, res) => {
     db.query(sql, [finalReason, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        listingsCache.clear(); // NEW
         res.json({ success: true, message: 'Landlord request rejected' });
     });
 };
@@ -116,6 +113,7 @@ exports.updateUserAdmin = (req, res) => {
     db.query(sql, [full_name, email, role, address, contact, landlord_status, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        listingsCache.clear(); // NEW: landlord name/status shown on cached listings may have changed
         res.json({ success: true, message: 'User updated successfully' });
     });
 };
@@ -126,6 +124,7 @@ exports.deleteUserAdmin = (req, res) => {
     db.query('DELETE FROM users WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        listingsCache.clear(); // NEW: this user's listings may no longer appear in /api/view
         res.json({ success: true, message: 'User deleted successfully' });
     });
 };
@@ -154,7 +153,7 @@ exports.updateListingAdmin = (req, res) => {
     db.query(sql, [title, category, price, location, rooms, size, amenities, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
-        listingsCache.clear(); // NEW: keep the public Browse view in sync with this admin edit
+        listingsCache.clear(); // keep the public Browse view in sync with this admin edit
         res.json({ success: true, message: 'Listing updated successfully' });
     });
 };
@@ -165,7 +164,7 @@ exports.deleteListingAdmin = (req, res) => {
     db.query('DELETE FROM listings WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
-        listingsCache.clear(); // NEW: don't let a cached /api/view keep showing a listing an admin just removed
+        listingsCache.clear(); // don't let a cached /api/view keep showing a listing an admin just removed
         res.json({ success: true, message: 'Listing deleted successfully' });
     });
 };
@@ -185,14 +184,14 @@ exports.deleteReviewAdmin = (req, res) => {
     db.query('DELETE FROM reviews WHERE id = ?', [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Review not found' });
-        listingsCache.clear(); // NEW: a deleted review can change the listing's avg_rating/review_count
+        listingsCache.clear(); // a deleted review can change the listing's avg_rating/review_count
         res.json({ success: true, message: 'Review deleted successfully' });
     });
 };
 
-// --- NEW: ADMIN ACCOUNT MANAGEMENT (CRUD for admin accounts themselves) ---
-// This is what powers the new "Settings" panel in admin.html, letting a
-// logged-in admin create/edit/delete OTHER admin accounts.
+// --- ADMIN ACCOUNT MANAGEMENT (CRUD for admin accounts themselves) ---
+// Powers the "Settings" panel in admin.html, letting a logged-in admin
+// create/edit/delete OTHER admin accounts.
 
 // LIST all admins (id, name, email, created_at only - never sends passwords)
 exports.getAllAdmins = (req, res) => {
