@@ -1,4 +1,6 @@
 const db = require('../config/db');
+// NEW: password hashing for sign up (see createUser below)
+const bcrypt = require('bcryptjs');
 // NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
 // Used here AND in server.js so both stay in sync.
 const { runSmartSearch } = require('../utils/smartSearchLogic');
@@ -6,29 +8,61 @@ const { runSmartSearch } = require('../utils/smartSearchLogic');
 // the full explanation of the TTL + clear-on-write strategy.
 const listingsCache = require('../utils/listingsCache');
 
-// 1. GET ALL USERS (Used for Login)
+// 1. GET ALL USERS
+// UPDATED: no longer reachable - the GET /users route was removed because it
+// sent every user's password to the browser (login is now POST /api/login in
+// authController.js). Kept here, but it strips sensitive columns just in case
+// it ever gets wired up again.
 exports.getAllUsers = (req, res) => {
     const sql = "SELECT * FROM users";
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+        const safeRows = rows.map(({ password, landlord_documents, ...rest }) => rest);
+        res.json(safeRows);
     });
 };
 
 // 2. CREATE NEW USER (Used for Sign Up)
+// UPDATED:
+// - the password is stored as a bcrypt hash, never plain text
+// - role is ALWAYS 'pending' here. The old version trusted whatever role the
+//   browser sent, so anyone could register as 'landlord' and skip the admin
+//   approval flow.
+// - duplicate emails are rejected
 exports.createUser = (req, res) => {
-    const { full_name, email, password, role } = req.body;
-    const sql = `INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, ?)`;
-    db.query(sql, [full_name, email, password, role], (err, result) => {
-        if (err) {
-            console.error("SQL Error:", err.message);
-            return res.status(500).json({ error: err.message });
+    const { full_name, email, password } = req.body;
+
+    if (!full_name || !email || !password || String(password).length < 8) {
+        return res.status(400).json({ success: false, message: 'Name, email, and a password of at least 8 characters are required.' });
+    }
+
+    const cleanEmail = String(email).trim().toLowerCase();
+
+    db.query('SELECT id FROM users WHERE LOWER(email) = ? LIMIT 1', [cleanEmail], async (err, rows) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (rows.length > 0) {
+            return res.status(409).json({ success: false, message: 'An account with that email already exists.' });
         }
-        res.json({ success: true, message: 'Account Created Successfully', id: result.insertId });
+
+        try {
+            const hash = await bcrypt.hash(String(password), 10);
+            const sql = `INSERT INTO users (full_name, email, password, role) VALUES (?, ?, ?, 'pending')`;
+            db.query(sql, [String(full_name).trim(), cleanEmail, hash], (insErr, result) => {
+                if (insErr) {
+                    console.error("SQL Error:", insErr.message);
+                    return res.status(500).json({ success: false, message: 'Could not create the account.' });
+                }
+                res.json({ success: true, message: 'Account Created Successfully', id: result.insertId });
+            });
+        } catch (e) {
+            res.status(500).json({ success: false, message: 'Could not create the account.' });
+        }
     });
 };
 
 // 3. UPDATE USER
+// (No longer reachable - the PUT /update route was removed because it had no
+// auth. Kept here for now; safe to delete later.)
 exports.updateUser = (req, res) => {
     const { id, full_name, email, role } = req.body;
     const sql = `UPDATE users SET full_name = ?, email = ?, role = ? WHERE id = ?`;
@@ -44,6 +78,8 @@ exports.updateUser = (req, res) => {
 };
 
 // 4. DELETE USER
+// (No longer reachable - the DELETE /delete route was removed because it had
+// no auth. Kept here for now; safe to delete later.)
 exports.deleteUser = (req, res) => {
     const { id } = req.body;
     db.query('DELETE FROM users WHERE id = ?', [id], (err, result) => {
@@ -58,15 +94,14 @@ exports.deleteUser = (req, res) => {
 };
 
 // 5. SEARCH BY ID
+// UPDATED: never returns the password or the landlord verification documents.
 exports.getUserById = (req, res) => {
     const id = req.params.id;
     db.query('SELECT * FROM users WHERE id = ?', [id], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
-        if (rows.length > 0) {
-            res.json(rows[0]);
-        } else {
-            res.status(404).json({ message: 'User not found' });
-        }
+        if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+        const { password, landlord_documents, ...safeUser } = rows[0];
+        res.json(safeUser);
     });
 };
 
