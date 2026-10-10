@@ -1,4 +1,8 @@
 const db = require('../config/db');
+const bcrypt = require('bcryptjs');
+
+const BCRYPT_ROUNDS = 10;
+const isBcryptHash = (str) => typeof str === 'string' && /^\$2[aby]\$\d{2}\$/.test(str);
 // Same in-memory /api/view cache used by userController.js - admin
 // edits/deletes bypass userController.js entirely, so without clearing it
 // here too, an admin fixing a listing's price (for example) wouldn't show
@@ -6,23 +10,45 @@ const db = require('../config/db');
 const listingsCache = require('../utils/listingsCache');
 
 // --- ADMIN LOGIN ---
-// Checks the `admins` DB table so multiple admin accounts can exist and log
-// in independently. ADMIN_KEY is still the shared secret returned on success
-// and required on every other admin route.
+// Checks the `admins` DB table. Passwords are bcrypt-hashed. Any admin still
+// on a plain-text password is accepted once and upgraded to a hash right then.
+// ADMIN_KEY is still the shared secret returned on success (replaced by a
+// signed, expiring token in the next security step).
 exports.adminLogin = (req, res) => {
-    const { email, password } = req.body;
+    const email = (req.body.email || '').toString().trim();
+    const password = (req.body.password || '').toString();
 
     if (!email || !password) {
         return res.status(400).json({ success: false, message: 'Email and password are required.' });
     }
 
-    const sql = `SELECT id, full_name, email FROM admins WHERE email = ? AND password = ?`;
-    db.query(sql, [email, password], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (rows.length === 0) {
-            return res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+    db.query('SELECT id, full_name, email, password FROM admins WHERE email = ? LIMIT 1', [email], async (err, rows) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+
+        const invalid = () => res.status(401).json({ success: false, message: 'Invalid admin credentials' });
+        const admin = rows[0];
+        if (!admin) return invalid();
+
+        let ok = false;
+        try {
+            if (isBcryptHash(admin.password)) {
+                ok = await bcrypt.compare(password, admin.password);
+            } else if (String(admin.password || '') === password) {
+                ok = true;
+                const newHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+                db.query('UPDATE admins SET password = ? WHERE id = ?', [newHash, admin.id], () => {});
+            }
+        } catch (e) {
+            return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
         }
-        return res.json({ success: true, adminKey: process.env.ADMIN_KEY, admin: rows[0] });
+
+        if (!ok) return invalid();
+
+        return res.json({
+            success: true,
+            adminKey: process.env.ADMIN_KEY,
+            admin: { id: admin.id, full_name: admin.full_name, email: admin.email }
+        });
     });
 };
 
@@ -202,8 +228,8 @@ exports.getAllAdmins = (req, res) => {
     });
 };
 
-// CREATE a new admin account
-exports.createAdmin = (req, res) => {
+// CREATE a new admin account (password is stored as a bcrypt hash)
+exports.createAdmin = async (req, res) => {
     const { full_name, email, password } = req.body;
 
     if (!full_name || !email || !password) {
@@ -213,22 +239,27 @@ exports.createAdmin = (req, res) => {
         return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
     }
 
-    const sql = `INSERT INTO admins (full_name, email, password) VALUES (?, ?, ?)`;
-    db.query(sql, [full_name, email, password], (err, result) => {
-        if (err) {
-            // MySQL duplicate-key error code, thrown by the UNIQUE constraint on email
-            if (err.code === 'ER_DUP_ENTRY') {
-                return res.status(409).json({ success: false, message: 'An admin with that email already exists.' });
+    try {
+        const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+        const sql = `INSERT INTO admins (full_name, email, password) VALUES (?, ?, ?)`;
+        db.query(sql, [full_name, email, hash], (err, result) => {
+            if (err) {
+                // MySQL duplicate-key error code, thrown by the UNIQUE constraint on email
+                if (err.code === 'ER_DUP_ENTRY') {
+                    return res.status(409).json({ success: false, message: 'An admin with that email already exists.' });
+                }
+                return res.status(500).json({ error: err.message });
             }
-            return res.status(500).json({ error: err.message });
-        }
-        res.json({ success: true, message: 'Admin account created successfully', id: result.insertId });
-    });
+            res.json({ success: true, message: 'Admin account created successfully', id: result.insertId });
+        });
+    } catch (e) {
+        res.status(500).json({ success: false, message: 'Could not create the admin account.' });
+    }
 };
 
 // UPDATE an existing admin account. Password is optional on edit - leaving
 // it blank on the frontend keeps the existing password unchanged.
-exports.updateAdmin = (req, res) => {
+exports.updateAdmin = async (req, res) => {
     const { id } = req.params;
     const { full_name, email, password } = req.body;
 
@@ -253,7 +284,12 @@ exports.updateAdmin = (req, res) => {
         if (password.length < 6) {
             return res.status(400).json({ success: false, message: 'Password must be at least 6 characters.' });
         }
-        finishUpdate(`UPDATE admins SET full_name=?, email=?, password=? WHERE id=?`, [full_name, email, password, id]);
+        try {
+            const hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+            finishUpdate(`UPDATE admins SET full_name=?, email=?, password=? WHERE id=?`, [full_name, email, hash, id]);
+        } catch (e) {
+            res.status(500).json({ success: false, message: 'Could not update the admin account.' });
+        }
     } else {
         finishUpdate(`UPDATE admins SET full_name=?, email=? WHERE id=?`, [full_name, email, id]);
     }
