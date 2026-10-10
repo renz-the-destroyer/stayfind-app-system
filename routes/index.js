@@ -3,6 +3,8 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 // NEW: zero-result Smart Search suggestions
 const searchController = require('../controllers/searchController');
+// NEW: server-side login (bcrypt)
+const authController = require('../controllers/authController');
 
 // --- 1. API HEALTH CHECK ---
 // You can visit https://stayfind-app-system.onrender.com/api/test to see if it's working
@@ -13,13 +15,14 @@ router.get('/test', (req, res) => res.json({ message: "API is Online and Connect
 router.get('/view', userController.getAllListings); 
 router.get('/view/:id', userController.getUserById);
 
-// ADDED: Specific route for Login/Authentication to fetch the user table
-router.get('/users', userController.getAllUsers);
+// NEW: server-side login. REPLACES the old GET /users, which sent every
+// user's password (and landlord documents) to the browser.
+router.post('/login', authController.login);
 
 // --- 3. ACCOUNT CREATION & MANAGEMENT ---
 router.post('/add', userController.createUser);
-router.put('/update', userController.updateUser);
-router.delete('/delete', userController.deleteUser);
+// REMOVED: PUT /update and DELETE /delete had no auth at all (anyone could edit
+// or delete any user by id) and nothing in the frontend calls them.
 
 // --- 4. PROPERTY LISTING ROUTES ---
 // This handles the "Publish Listing" button from home.js
