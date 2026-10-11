@@ -30,6 +30,7 @@ exports.getAllUsers = (req, res) => {
 //   browser sent, so anyone could register as 'landlord' and skip the admin
 //   approval flow.
 // - duplicate emails are rejected
+// - returns a login token so the new user can go straight to the dashboard
 exports.createUser = (req, res) => {
     const { full_name, email, password } = req.body;
 
