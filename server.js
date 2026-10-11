@@ -6,10 +6,10 @@ const cors = require('cors');
 require('dotenv').config();
 // DATABASE CONNECTION
 const db = require('./config/db');
-// ROUTES
-const routes = require('./routes/index.js');
 // NEW: Admin routes (separate router, protected by ADMIN_KEY)
 const adminRoutes = require('./routes/adminRoutes');
+// ROUTES
+const routes = require('./routes/index.js');
 // UTILIZATION OF EXPRESS
 const app = express();
 
