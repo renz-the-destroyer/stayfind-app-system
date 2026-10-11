@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
+const { signAdminToken, requireAdmin } = require('../middleware/auth');
 
 const BCRYPT_ROUNDS = 10;
 const isBcryptHash = (str) => typeof str === 'string' && /^\$2[aby]\$\d{2}\$/.test(str);
@@ -44,22 +45,28 @@ exports.adminLogin = (req, res) => {
 
         if (!ok) return invalid();
 
+        // The "adminKey" the panel stores and sends back in the x-admin-key header
+        // is now a SIGNED token that expires after 8 hours (no more shared,
+        // never-expiring ADMIN_KEY). admin.js needs no changes.
+        let adminToken;
+        try {
+            adminToken = signAdminToken(admin);
+        } catch (e) {
+            return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        }
+
         return res.json({
             success: true,
-            adminKey: process.env.ADMIN_KEY,
+            adminKey: adminToken,
             admin: { id: admin.id, full_name: admin.full_name, email: admin.email }
         });
     });
 };
 
 // --- MIDDLEWARE: guards every route below it ---
-exports.verifyAdminKey = (req, res, next) => {
-    const key = req.headers['x-admin-key'];
-    if (!key || key !== process.env.ADMIN_KEY) {
-        return res.status(401).json({ success: false, message: 'Unauthorized: invalid or missing admin key' });
-    }
-    next();
-};
+// Verifies the signed admin token from the x-admin-key header (see
+// middleware/auth.js). Same exported name as before, so adminRoutes.js is unchanged.
+exports.verifyAdminKey = requireAdmin;
 
 // --- DASHBOARD STATS ---
 exports.getStats = (req, res) => {
