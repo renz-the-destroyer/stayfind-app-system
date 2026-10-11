@@ -1,6 +1,7 @@
 const db = require('../config/db');
 // NEW: password hashing for sign up (see createUser below)
 const bcrypt = require('bcryptjs');
+const { signUserToken } = require('../middleware/auth');
 // NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
 // Used here AND in server.js so both stay in sync.
 const { runSmartSearch } = require('../utils/smartSearchLogic');
@@ -52,7 +53,13 @@ exports.createUser = (req, res) => {
                     console.error("SQL Error:", insErr.message);
                     return res.status(500).json({ success: false, message: 'Could not create the account.' });
                 }
-                res.json({ success: true, message: 'Account Created Successfully', id: result.insertId });
+                let token;
+                try {
+                    token = signUserToken({ id: result.insertId });
+                } catch (tokenErr) {
+                    return res.status(500).json({ success: false, message: 'Account created, but sign-in is unavailable. Please log in.' });
+                }
+                res.json({ success: true, message: 'Account Created Successfully', id: result.insertId, token });
             });
         } catch (e) {
             res.status(500).json({ success: false, message: 'Could not create the account.' });
@@ -97,6 +104,8 @@ exports.deleteUser = (req, res) => {
 // UPDATED: never returns the password or the landlord verification documents.
 exports.getUserById = (req, res) => {
     const id = req.params.id;
+    // Only your own profile - nobody can read another user's details by id.
+    if (String(id) !== String(req.userId)) return res.status(403).json({ message: 'Forbidden' });
     db.query('SELECT * FROM users WHERE id = ?', [id], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
@@ -121,7 +130,13 @@ exports.getUserById = (req, res) => {
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email, landlord_documents, landlord_doc_name } = req.body;
 
-    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, landlord_doc_name, updated_at FROM users WHERE email = ?', [email], (err, results) => {
+    // Only these two roles can be requested here. 'landlord' still goes through
+    // the document + admin approval gate below.
+    if (role && !['tenant', 'landlord'].includes(role)) {
+        return res.status(400).json({ success: false, message: 'Invalid role.' });
+    }
+
+    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, landlord_doc_name, updated_at FROM users WHERE id = ?', [req.userId], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
@@ -239,7 +254,7 @@ exports.updateProfile = (req, res) => {
         // landlord request would keep resetting the timer forever and the
         // lock would never actually expire.
         const timestampSQL = (isChangingPersonalInfo && !isLockedOut) ? 'updated_at = NOW()' : 'updated_at = updated_at';
-        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, landlord_doc_name = ?, ${timestampSQL} WHERE email = ?`;
+        const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, landlord_doc_name = ?, ${timestampSQL} WHERE id = ?`;
         
         db.query(sql, [
             effectiveFullName,
@@ -249,7 +264,7 @@ exports.updateProfile = (req, res) => {
             finalLandlordStatus,
             finalLandlordDocs,
             finalDocName,
-            email
+            req.userId
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
 
@@ -377,19 +392,15 @@ exports.getAllListings = (req, res) => {
 };
 
 // 8. ADD NEW LISTING
-// UPDATED: now also accepts/saves `status` ('available' | 'occupied'), used
-// by the new Available/Occupied filter buttons on home.html. Defaults to
-// 'available' if not sent or sent as anything unrecognized, so old
-// callers/clients that don't know about this field still work fine.
+// UPDATED: the owner comes from the login token (req.userId), not from the
+// request body, and only a user whose role is 'landlord' (set by admin
+// approval) can post. Also accepts/saves `status` ('available' | 'occupied').
 exports.addListing = (req, res) => {
-    const { user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, status } = req.body;
+    const { title, category, price, location, rooms, size, amenities, images, thumbnail, status } = req.body;
+    const user_id = req.userId;
     const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
-    // NEW: Friendly guard for oversized photo payloads, matching the one added
-    // to /api/update-listing in server.js. Managed MySQL hosts (like Clever
-    // Cloud's free tier) often cap max_allowed_packet well below our 50mb
-    // express body limit, so a very large combined image payload can fail at
-    // the DB layer. This gives a clear message instead of a silent crash.
+    // Friendly guard for oversized photo payloads (see the Cloudinary note in home.js).
     if (images) {
         const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
         if (approxSizeMB > 15) {
@@ -401,47 +412,62 @@ exports.addListing = (req, res) => {
         }
     }
 
-    const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, status) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, finalStatus];
+    db.query('SELECT role FROM users WHERE id = ?', [user_id], (roleErr, roleRows) => {
+        if (roleErr) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (roleRows.length === 0 || roleRows[0].role !== 'landlord') {
+            return res.status(403).json({ success: false, message: 'Only approved landlords can post listings.' });
+        }
 
-    db.query(sql, values, (err, result) => {
-        // FIX: now also included as `message` (in addition to the existing
-        // `error` field) since home.js reads `errResult.message` when showing
-        // the failure popup. Previously the real DB error (e.g. "Data too long
-        // for column 'images'" if the column is still TEXT instead of
-        // LONGTEXT) was silently swallowed and the user only saw a generic
-        // "Failed to post" alert.
-        if (err) return res.status(500).json({ success: false, error: err.message, message: err.message });
-        listingsCache.clear(); // NEW: a new listing exists now - don't let a cached /api/view hide it
-        res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
+        const sql = `INSERT INTO listings (user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, status) 
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+        const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, finalStatus];
+
+        db.query(sql, values, (err, result) => {
+            // `message` is included (besides `error`) because home.js shows errResult.message.
+            if (err) return res.status(500).json({ success: false, error: err.message, message: err.message });
+            listingsCache.clear(); // a new listing exists now - don't let a cached /api/view hide it
+            res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
+        });
     });
 };
 
 // 9. ADD REVIEW (Supports Landlord Replies)
-// UPDATED: now also accepts/saves `parent_review_id` so a landlord's reply
-// is properly linked to the specific tenant review it answers, instead of
-// just being marked is_reply=1 and relying on created_at ordering to land
-// near the right comment. Requires a one-time migration on the `reviews`
-// table (safe to run even with existing rows - it just adds a nullable
-// column):
-//   ALTER TABLE reviews ADD COLUMN parent_review_id INT NULL DEFAULT NULL;
-// A plain tenant review/comment sends no parent_review_id (stored as NULL);
-// home.js's loadComments() groups replies under their parent client-side.
+// UPDATED: the reviewer is the logged-in user (from the token), the display
+// name comes from the DB (can't be faked), only the listing's own landlord can
+// post a reply, and a landlord's own listing never receives a star rating from them.
+// Requires `parent_review_id INT NULL` on the reviews table (see earlier migration).
 exports.addReview = (req, res) => {
-    const { listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id } = req.body;
+    const { listing_id, comment, rating, is_reply, parent_review_id } = req.body;
+    const user_id = req.userId;
 
-    // rating is 0 if it's a landlord reply
-    const finalRating = is_reply ? 0 : (rating || 0);
-    const finalReplyStatus = is_reply ? 1 : 0;
-    const finalParentId = is_reply && parent_review_id ? parent_review_id : null;
+    if (!listing_id) return res.status(400).json({ success: false, message: 'listing_id is required.' });
 
-    const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+    const lookupSql = `SELECT u.full_name, l.user_id AS owner_id
+                       FROM users u JOIN listings l ON l.id = ?
+                       WHERE u.id = ?`;
+    db.query(lookupSql, [listing_id, user_id], (lookupErr, rows) => {
+        if (lookupErr) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (rows.length === 0) return res.status(404).json({ success: false, message: 'Listing not found.' });
 
-    db.query(sql, [listing_id, user_id, user_name, comment, finalRating, finalReplyStatus, finalParentId], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        listingsCache.clear(); // NEW: this review/reply changes the listing's avg_rating/review_count
-        res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
+        const { full_name, owner_id } = rows[0];
+        const isOwner = Number(owner_id) === Number(user_id);
+
+        if (is_reply && !isOwner) {
+            return res.status(403).json({ success: false, message: 'Only the landlord of this listing can reply.' });
+        }
+
+        // rating is 0 for a landlord reply or the landlord's own comment
+        const cleanRating = Math.min(5, Math.max(0, parseInt(rating) || 0));
+        const finalRating = (is_reply || isOwner) ? 0 : cleanRating;
+        const finalReplyStatus = is_reply ? 1 : 0;
+        const finalParentId = is_reply && parent_review_id ? parent_review_id : null;
+
+        const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+        db.query(sql, [listing_id, user_id, full_name || 'User', comment, finalRating, finalReplyStatus, finalParentId], (err) => {
+            if (err) return res.status(500).json({ error: err.message });
+            listingsCache.clear(); // changes the listing's avg_rating/review_count
+            res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
+        });
     });
 };
 
@@ -460,7 +486,7 @@ exports.getReviews = (req, res) => {
 // 11. DELETE LISTING
 exports.deleteListing = (req, res) => {
     const listingId = req.params.id;
-    const { user_id } = req.body; 
+    const user_id = req.userId; // from the login token
 
     const sql = "DELETE FROM listings WHERE id = ? AND user_id = ?";
     
@@ -490,7 +516,8 @@ exports.deleteListing = (req, res) => {
 //   - guards against an oversized combined photo payload (>15MB), same
 //     threshold used in addListing() above and in the removed inline handler
 exports.updateListing = (req, res) => {
-    const { listingId, user_id, title, category, price, location, rooms, size, amenities, status, thumbnail, images } = req.body;
+    const { listingId, title, category, price, location, rooms, size, amenities, status, thumbnail, images } = req.body;
+    const user_id = req.userId; // from the login token
     const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
     if (images) {
@@ -525,7 +552,8 @@ exports.updateListing = (req, res) => {
 // inline duplicate registered directly on `app` in server.js has been
 // removed (same shadowing issue described on updateListing() above).
 exports.toggleBookmark = (req, res) => {
-    const { userId, listingId, action } = req.body;
+    const { listingId, action } = req.body;
+    const userId = req.userId; // from the login token
 
     if (action === 'add') {
         const sql = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
@@ -547,6 +575,7 @@ exports.toggleBookmark = (req, res) => {
 // same shadowing issue as toggleBookmark() above, now resolved.
 exports.getBookmarks = (req, res) => {
     const userId = req.params.id;
+    if (String(userId) !== String(req.userId)) return res.status(403).json({ message: 'Forbidden' });
     const sql = "SELECT listing_id FROM bookmarks WHERE user_id = ?";
     db.query(sql, [userId], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -618,55 +647,54 @@ exports.smartSearch = (req, res) => {
 // they click "Message Landlord" from that listing more than once.
 
 // 16a. START (OR RESUME) A CONVERSATION
-// Called when a tenant taps "Message Landlord" on a listing. Looks for an
-// existing thread for this exact (listing, tenant, landlord) triple first,
-// and only creates a new one if none exists - this is what the UNIQUE KEY
-// above is for, so a tenant messaging the same landlord twice about the same
-// listing always reopens the same conversation instead of fragmenting it.
+// UPDATED: the tenant is the logged-in user (token) and the landlord is looked
+// up from the listing itself, so ids sent in the body are ignored.
 exports.startConversation = (req, res) => {
-    const { listing_id, tenant_id, landlord_id } = req.body;
+    const { listing_id } = req.body;
+    const tenant_id = req.userId;
 
-    if (!listing_id || !tenant_id || !landlord_id) {
-        return res.status(400).json({ success: false, message: 'listing_id, tenant_id, and landlord_id are all required.' });
-    }
-    if (String(tenant_id) === String(landlord_id)) {
-        return res.status(400).json({ success: false, message: "You can't message yourself about your own listing." });
+    if (!listing_id) {
+        return res.status(400).json({ success: false, message: 'listing_id is required.' });
     }
 
-    const findSql = `SELECT id FROM conversations WHERE listing_id = ? AND tenant_id = ? AND landlord_id = ?`;
-    db.query(findSql, [listing_id, tenant_id, landlord_id], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    db.query('SELECT user_id FROM listings WHERE id = ?', [listing_id], (lErr, lRows) => {
+        if (lErr) return res.status(500).json({ error: lErr.message });
+        if (lRows.length === 0) return res.status(404).json({ success: false, message: 'Listing not found.' });
 
-        if (rows.length > 0) {
-            return res.json({ success: true, conversation_id: rows[0].id });
+        const landlord_id = lRows[0].user_id;
+        if (String(tenant_id) === String(landlord_id)) {
+            return res.status(400).json({ success: false, message: "You can't message yourself about your own listing." });
         }
 
-        const insertSql = `INSERT INTO conversations (listing_id, tenant_id, landlord_id) VALUES (?, ?, ?)`;
-        db.query(insertSql, [listing_id, tenant_id, landlord_id], (insertErr, result) => {
-            // ER_DUP_ENTRY can happen if two requests race (e.g. a double
-            // click) and both try to create the same thread - fall back to
-            // looking it up instead of failing the request.
-            if (insertErr && insertErr.code === 'ER_DUP_ENTRY') {
-                return db.query(findSql, [listing_id, tenant_id, landlord_id], (raceErr, raceRows) => {
-                    if (raceErr) return res.status(500).json({ error: raceErr.message });
-                    return res.json({ success: true, conversation_id: raceRows[0].id });
-                });
+        const findSql = `SELECT id FROM conversations WHERE listing_id = ? AND tenant_id = ? AND landlord_id = ?`;
+        db.query(findSql, [listing_id, tenant_id, landlord_id], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+
+            if (rows.length > 0) {
+                return res.json({ success: true, conversation_id: rows[0].id });
             }
-            if (insertErr) return res.status(500).json({ error: insertErr.message });
-            res.json({ success: true, conversation_id: result.insertId });
+
+            const insertSql = `INSERT INTO conversations (listing_id, tenant_id, landlord_id) VALUES (?, ?, ?)`;
+            db.query(insertSql, [listing_id, tenant_id, landlord_id], (insertErr, result) => {
+                // Two requests racing (double click) can both try to create the thread.
+                if (insertErr && insertErr.code === 'ER_DUP_ENTRY') {
+                    return db.query(findSql, [listing_id, tenant_id, landlord_id], (raceErr, raceRows) => {
+                        if (raceErr) return res.status(500).json({ error: raceErr.message });
+                        return res.json({ success: true, conversation_id: raceRows[0].id });
+                    });
+                }
+                if (insertErr) return res.status(500).json({ error: insertErr.message });
+                res.json({ success: true, conversation_id: result.insertId });
+            });
         });
     });
 };
 
 // 16b. LIST A USER'S CONVERSATIONS (their Messages inbox)
-// A user can show up as either the tenant or the landlord side of a thread
-// depending on which listing it's about, so the CASE expressions below pick
-// out "the other person" and their name relative to whoever is asking.
-// Each row also carries the most recent message (as a preview) and how many
-// unread messages this user specifically has waiting, via two correlated
-// subqueries - same pattern as avg_rating/review_count on listings.
+// UPDATED: you can only list your own conversations.
 exports.getConversations = (req, res) => {
     const userId = req.params.userId;
+    if (String(userId) !== String(req.userId)) return res.status(403).json({ message: 'Forbidden' });
 
     const sql = `
         SELECT c.*,
@@ -690,48 +718,67 @@ exports.getConversations = (req, res) => {
     });
 };
 
+// Shared check: is the logged-in user one of the two people in this conversation?
+function checkConversationMember(conversationId, userId, callback) {
+    db.query('SELECT tenant_id, landlord_id FROM conversations WHERE id = ?', [conversationId], (err, rows) => {
+        if (err) return callback(err);
+        if (rows.length === 0) return callback(null, 'not_found');
+        const c = rows[0];
+        const isMember = String(c.tenant_id) === String(userId) || String(c.landlord_id) === String(userId);
+        callback(null, isMember ? 'ok' : 'forbidden');
+    });
+}
+
 // 16c. GET MESSAGES IN A CONVERSATION
-// Pass ?user_id=<viewer> so this can mark every message NOT sent by the
-// viewer as read - that's what clears the unread badge/count for them.
-// Marking-as-read happens after the fetch so the response itself isn't
-// affected by it (the viewer still sees exactly what was in the thread at
-// the moment they opened it).
+// UPDATED: only the two people in the conversation can read it, and "mark as
+// read" applies to the logged-in user (the ?user_id= query param is ignored).
 exports.getMessages = (req, res) => {
     const conversationId = req.params.conversationId;
-    const viewerId = req.query.user_id;
+    const viewerId = req.userId;
 
-    const sql = `SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`;
-    db.query(sql, [conversationId], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
+    checkConversationMember(conversationId, viewerId, (memberErr, status) => {
+        if (memberErr) return res.status(500).json({ error: memberErr.message });
+        if (status === 'not_found') return res.status(404).json({ message: 'Conversation not found' });
+        if (status === 'forbidden') return res.status(403).json({ message: 'Forbidden' });
 
-        if (viewerId) {
+        db.query(`SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC`, [conversationId], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+
             const markReadSql = `UPDATE messages SET is_read = 1 WHERE conversation_id = ? AND sender_id != ? AND is_read = 0`;
-            db.query(markReadSql, [conversationId, viewerId], () => { /* best-effort - the message list already went out */ });
-        }
+            db.query(markReadSql, [conversationId, viewerId], () => { /* best-effort - the list already went out */ });
 
-        res.json(rows);
+            res.json(rows);
+        });
     });
 };
 
 // 16d. SEND A MESSAGE
+// UPDATED: the sender is the logged-in user, and they must be part of the conversation.
 exports.sendMessage = (req, res) => {
-    const { conversation_id, sender_id, message } = req.body;
+    const { conversation_id, message } = req.body;
+    const sender_id = req.userId;
     const trimmed = (message || '').trim();
 
-    if (!conversation_id || !sender_id || !trimmed) {
-        return res.status(400).json({ success: false, message: 'conversation_id, sender_id, and a non-empty message are required.' });
+    if (!conversation_id || !trimmed) {
+        return res.status(400).json({ success: false, message: 'conversation_id and a non-empty message are required.' });
     }
 
-    const insertSql = `INSERT INTO messages (conversation_id, sender_id, message) VALUES (?, ?, ?)`;
-    db.query(insertSql, [conversation_id, sender_id, trimmed], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
+    checkConversationMember(conversation_id, sender_id, (memberErr, status) => {
+        if (memberErr) return res.status(500).json({ error: memberErr.message });
+        if (status === 'not_found') return res.status(404).json({ success: false, message: 'Conversation not found' });
+        if (status === 'forbidden') return res.status(403).json({ success: false, message: 'Forbidden' });
 
-        db.query(`UPDATE conversations SET last_message_at = NOW() WHERE id = ?`, [conversation_id], () => { /* best-effort */ });
+        const insertSql = `INSERT INTO messages (conversation_id, sender_id, message) VALUES (?, ?, ?)`;
+        db.query(insertSql, [conversation_id, sender_id, trimmed], (err, result) => {
+            if (err) return res.status(500).json({ error: err.message });
 
-        res.json({
-            success: true,
-            message_id: result.insertId,
-            created_at: new Date().toISOString()
+            db.query(`UPDATE conversations SET last_message_at = NOW() WHERE id = ?`, [conversation_id], () => { /* best-effort */ });
+
+            res.json({
+                success: true,
+                message_id: result.insertId,
+                created_at: new Date().toISOString()
+            });
         });
     });
 };
