@@ -6,10 +6,10 @@ const cors = require('cors');
 require('dotenv').config();
 // DATABASE CONNECTION
 const db = require('./config/db');
-// NEW: Admin routes (separate router, protected by ADMIN_KEY)
-const adminRoutes = require('./routes/adminRoutes');
 // ROUTES
 const routes = require('./routes/index.js');
+// NEW: Admin routes (separate router, protected by ADMIN_KEY)
+const adminRoutes = require('./routes/adminRoutes');
 // UTILIZATION OF EXPRESS
 const app = express();
 
@@ -38,12 +38,14 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // photo editing changed for the user.
 
 // USE ROUTES
-app.use('/api', routes);
+app.use('/api/admin', adminRoutes);
 // NEW: Mount admin routes under /api/admin. Anything hitting
 // /api/admin/login, /api/admin/stats, /api/admin/users, etc. is handled by
 // adminRoutes.js -> adminController.js. This is what admin.js's API_BASE
 // ("https://stayfind-app-system.onrender.com/api/admin") depends on.
-app.use('/api/admin', adminRoutes);
+app.use('/api', routes);
+
+
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
