@@ -15,6 +15,7 @@
 
 const bcrypt = require('bcryptjs');
 const db = require('../config/db');
+const { signUserToken } = require('../middleware/auth');
 
 const BCRYPT_ROUNDS = 10;
 const isBcryptHash = (s) => typeof s === 'string' && /^\$2[aby]\$\d{2}\$/.test(s);
@@ -61,6 +62,13 @@ exports.login = (req, res) => {
 
         delete user.password;
         delete user.landlord_documents; // big base64 blobs the browser never needs
-        res.json({ success: true, user });
+
+        let token;
+        try {
+            token = signUserToken(user);
+        } catch (e) {
+            return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        }
+        res.json({ success: true, user, token });
     });
 };
