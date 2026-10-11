@@ -6,12 +6,18 @@ const cors = require('cors');
 require('dotenv').config();
 // DATABASE CONNECTION
 const db = require('./config/db');
+// NEW: Admin routes (separate router, protected by a signed admin token)
+const adminRoutes = require('./routes/adminRoutes');
 // ROUTES
 const routes = require('./routes/index.js');
-// NEW: Admin routes (separate router, protected by ADMIN_KEY)
-const adminRoutes = require('./routes/adminRoutes');
 // UTILIZATION OF EXPRESS
 const app = express();
+
+// NEW: Render puts one proxy in front of this app. Without this line every
+// visitor looks like the same IP address, so the login rate limit
+// (middleware/rateLimit.js) would count everyone's failed logins together and
+// could lock the whole site out. With it, each visitor is limited separately.
+app.set('trust proxy', 1);
 
 // MIDDLEWARES
 app.use(cors());
@@ -38,14 +44,16 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // photo editing changed for the user.
 
 // USE ROUTES
+// IMPORTANT: the admin routes must be mounted BEFORE '/api'. routes/index.js
+// requires a normal user's login token for everything under /api (except
+// login/signup), so if '/api' came first, the admin login would be rejected
+// with "Please log in." before it ever reached the admin router.
+// Anything hitting /api/admin/login, /api/admin/stats, /api/admin/users, etc.
+// is handled by adminRoutes.js -> adminController.js, and every admin route
+// after the login needs a valid signed admin token. This is what admin.js's
+// API_BASE ("https://stayfind-app-system.onrender.com/api/admin") depends on.
 app.use('/api/admin', adminRoutes);
-// NEW: Mount admin routes under /api/admin. Anything hitting
-// /api/admin/login, /api/admin/stats, /api/admin/users, etc. is handled by
-// adminRoutes.js -> adminController.js. This is what admin.js's API_BASE
-// ("https://stayfind-app-system.onrender.com/api/admin") depends on.
 app.use('/api', routes);
-
-
 
 // Global error handling middleware
 app.use((err, req, res, next) => {
