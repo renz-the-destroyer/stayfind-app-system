@@ -3,6 +3,8 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const searchController = require('../controllers/searchController');
 const authController = require('../controllers/authController');
+// NEW: brute-force / spam limits (see middleware/rateLimit.js)
+const { loginLimiter, signupLimiter } = require('../middleware/rateLimit');
 // NEW: login-token check (JWT) - see middleware/auth.js
 const { requireUser } = require('../middleware/auth');
 
@@ -12,10 +14,10 @@ const { requireUser } = require('../middleware/auth');
 router.get('/test', (req, res) => res.json({ message: "API is Online and Connected!" }));
 
 // Server-side login (bcrypt) - returns the user + a signed token
-router.post('/login', authController.login);
+router.post('/login', loginLimiter, authController.login);
 
 // Sign up (the account is always created with role 'pending')
-router.post('/add', userController.createUser);
+router.post('/add', signupLimiter, userController.createUser);
 
 // ===================== EVERYTHING BELOW NEEDS A VALID LOGIN TOKEN =====================
 // The frontend (auth-fetch.js) sends "Authorization: Bearer <token>" on every call.
