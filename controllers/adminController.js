@@ -320,3 +320,143 @@ exports.deleteAdmin = (req, res) => {
         });
     });
 };
+
+// ============================================================================
+// ============================================================================
+//  ADMIN PANEL UPGRADE - everything BELOW this line is NEW.
+//  Everything above this line is your original code, unchanged.
+//
+//  In Node, a later `exports.x = ...` replaces an earlier one, so the versions
+//  below take over from the originals without removing them.
+// ============================================================================
+// ============================================================================
+
+// --- LANDLORD REQUESTS (lighter list) ---------------------------------------
+// Replaces the original getLandlordRequests. It NO LONGER sends the huge
+// base64 landlord_documents for every pending applicant. The documents are
+// fetched one applicant at a time by getLandlordRequestDocs below, only when an
+// admin clicks "View Docs".
+exports.getLandlordRequests = (req, res) => {
+    const sql = `
+        SELECT id, full_name, email, contact, address, landlord_doc_name,
+               (landlord_documents IS NOT NULL AND landlord_documents <> '') AS has_documents
+        FROM users
+        WHERE landlord_status = 'pending'
+        ORDER BY id DESC
+    `;
+    db.query(sql, (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// NEW: documents for ONE applicant (GET /api/admin/landlord-requests/:id/documents)
+exports.getLandlordRequestDocs = (req, res) => {
+    const { id } = req.params;
+    db.query('SELECT landlord_documents FROM users WHERE id = ?', [id], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+        res.json({ documents: rows[0].landlord_documents || '' });
+    });
+};
+
+// --- LISTINGS (lighter list) ------------------------------------------------
+// Replaces the original getAllListingsAdmin. Picks only the columns the panel
+// needs (no photo blobs). `thumbnail` is only sent when it's a short URL, so
+// old base64 thumbnails never bloat the response.
+exports.getAllListingsAdmin = (req, res) => {
+    const search = req.query.search ? `%${req.query.search}%` : '%';
+    const sql = `
+        SELECT l.id, l.user_id, l.title, l.category, l.price, l.location, l.rooms, l.size,
+               l.amenities, l.status, l.created_at,
+               CASE WHEN LENGTH(l.thumbnail) < 1000 THEN l.thumbnail ELSE NULL END AS thumbnail,
+               u.full_name AS landlord_name, u.email AS landlord_email
+        FROM listings l
+        JOIN users u ON l.user_id = u.id
+        WHERE l.title LIKE ? OR l.location LIKE ?
+        ORDER BY l.created_at DESC
+    `;
+    db.query(sql, [search, search], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// --- OVERVIEW CHARTS (GET /api/admin/overview) ------------------------------
+exports.getOverview = async (req, res) => {
+    const q = (sql) => new Promise((resolve, reject) => {
+        db.query(sql, (err, rows) => (err ? reject(err) : resolve(rows)));
+    });
+
+    try {
+        const [byCategory, byStatus, byLandlordStatus, perMonth] = await Promise.all([
+            q(`SELECT category, COUNT(*) AS n FROM listings GROUP BY category ORDER BY n DESC`),
+            q(`SELECT COALESCE(status,'available') AS status, COUNT(*) AS n
+               FROM listings GROUP BY COALESCE(status,'available')`),
+            q(`SELECT COALESCE(landlord_status,'none') AS status, COUNT(*) AS n
+               FROM users GROUP BY COALESCE(landlord_status,'none')`),
+            q(`SELECT DATE_FORMAT(created_at,'%Y-%m') AS ym, COUNT(*) AS n
+               FROM listings
+               WHERE created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 5 MONTH), '%Y-%m-01')
+               GROUP BY DATE_FORMAT(created_at,'%Y-%m')
+               ORDER BY ym`)
+        ]);
+        res.json({ byCategory, byStatus, byLandlordStatus, perMonth });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// --- ACTIVITY LOG (GET /api/admin/audit-log?limit=100) ----------------------
+exports.getAuditLog = (req, res) => {
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+    const sql = `
+        SELECT a.id, a.method, a.path, a.created_at, ad.full_name AS admin_name
+        FROM admin_audit_log a
+        LEFT JOIN admins ad ON ad.id = a.admin_id
+        ORDER BY a.id DESC
+        LIMIT ?
+    `;
+    db.query(sql, [limit], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+};
+
+// --- VALIDATION: editing a user ---------------------------------------------
+// Wraps the original updateUserAdmin: bad values are rejected BEFORE the
+// original code runs, so nothing invalid reaches the database.
+const _originalUpdateUserAdmin = exports.updateUserAdmin;
+const VALID_ROLES = ['tenant', 'landlord', 'pending'];
+const VALID_LANDLORD_STATUSES = ['none', 'pending', 'approved', 'rejected'];
+
+exports.updateUserAdmin = (req, res) => {
+    const { full_name, email, role, landlord_status } = req.body || {};
+
+    if (!full_name || !String(full_name).trim()) {
+        return res.status(400).json({ success: false, message: 'Full name is required.' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+        return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
+    }
+    if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({ success: false, message: 'Invalid role.' });
+    }
+    if (!VALID_LANDLORD_STATUSES.includes(landlord_status)) {
+        return res.status(400).json({ success: false, message: 'Invalid landlord status.' });
+    }
+
+    return _originalUpdateUserAdmin(req, res);
+};
+
+// --- GUARD: an admin can't delete their OWN account -------------------------
+// The panel already disables that button, but anyone calling the API directly
+// could skip it. Now the server refuses too.
+const _originalDeleteAdmin = exports.deleteAdmin;
+
+exports.deleteAdmin = (req, res) => {
+    if (String(req.params.id) === String(req.adminId)) {
+        return res.status(400).json({ success: false, message: "You can't delete your own admin account while logged in." });
+    }
+    return _originalDeleteAdmin(req, res);
+};
