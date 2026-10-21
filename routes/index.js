@@ -7,6 +7,11 @@ const authController = require('../controllers/authController');
 const { loginLimiter, signupLimiter } = require('../middleware/rateLimit');
 // NEW: login-token check (JWT) - see middleware/auth.js
 const { requireUser } = require('../middleware/auth');
+// NEW: cleans text fields and validates photo/document data (see middleware/sanitize.js)
+const { sanitizeBody } = require('../middleware/sanitize');
+
+// NEW: runs on EVERY request below (including sign up), before any controller.
+router.use(sanitizeBody);
 
 // ===================== PUBLIC ROUTES (no login needed) =====================
 
