@@ -460,3 +460,77 @@ exports.deleteAdmin = (req, res) => {
     }
     return _originalDeleteAdmin(req, res);
 };
+
+// --- LISTINGS: DELETE (fixed) -----------------------------------------------
+// Replaces the original deleteListingAdmin. The original deleted only the
+// listing row, so any listing that already had reviews, bookmarks or chats was
+// blocked by the database ("foreign key constraint fails") and the panel just
+// said "Failed to delete listing". This version removes those dependent rows
+// first, all inside one transaction (see utils/deleteListingWithDependents.js).
+// Deletes a listing AND everything that points at it (reviews, bookmarks, chat
+// conversations + their messages), all-or-nothing in ONE transaction.
+//   ownerId = null -> admin delete (any listing)
+//   ownerId = 12   -> landlord delete (only if user 12 owns the listing)
+//   done(err, affectedRows)   affectedRows is 0 if not found / not yours
+function deleteListingWithDependents(listingId, ownerId, done) {
+    db.getConnection((connErr, conn) => {
+        if (connErr) return done(connErr);
+
+        const fail = (err) => conn.rollback(() => { conn.release(); done(err); });
+
+        conn.beginTransaction((txErr) => {
+            if (txErr) { conn.release(); return done(txErr); }
+
+            const checkSql = ownerId === null
+                ? 'SELECT id FROM listings WHERE id = ?'
+                : 'SELECT id FROM listings WHERE id = ? AND user_id = ?';
+            const checkParams = ownerId === null ? [listingId] : [listingId, ownerId];
+
+            conn.query(checkSql, checkParams, (checkErr, rows) => {
+                if (checkErr) return fail(checkErr);
+                if (rows.length === 0) {
+                    // Not found, or not this landlord's listing: change nothing.
+                    return conn.rollback(() => { conn.release(); done(null, 0); });
+                }
+
+                // Order matters: children first, the listing itself last.
+                const steps = [
+                    ['DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE listing_id = ?)', [listingId]],
+                    ['DELETE FROM conversations WHERE listing_id = ?', [listingId]],
+                    // Landlord replies point at the review they answer, so remove replies first.
+                    ['DELETE FROM reviews WHERE listing_id = ? AND parent_review_id IS NOT NULL', [listingId]],
+                    ['DELETE FROM reviews WHERE listing_id = ?', [listingId]],
+                    ['DELETE FROM bookmarks WHERE listing_id = ?', [listingId]],
+                    ['DELETE FROM listings WHERE id = ?', [listingId]]
+                ];
+
+                const run = (i) => {
+                    if (i >= steps.length) {
+                        return conn.commit((commitErr) => {
+                            if (commitErr) return fail(commitErr);
+                            conn.release();
+                            done(null, 1);
+                        });
+                    }
+                    conn.query(steps[i][0], steps[i][1], (stepErr) => {
+                        if (stepErr) return fail(stepErr);
+                        run(i + 1);
+                    });
+                };
+                run(0);
+            });
+        });
+    });
+}
+
+exports.deleteListingAdmin = (req, res) => {
+    deleteListingWithDependents(req.params.id, null, (err, affectedRows) => {
+        if (err) {
+            console.error('Admin delete listing failed:', err.message);
+            return res.status(500).json({ error: err.message });
+        }
+        if (!affectedRows) return res.status(404).json({ message: 'Listing not found' });
+        listingsCache.clear(); // don't let a cached /api/view keep showing a listing an admin just removed
+        res.json({ success: true, message: 'Listing deleted successfully' });
+    });
+};
