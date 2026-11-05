@@ -116,18 +116,21 @@ exports.getUserById = (req, res) => {
 };
 
 // 6. UPDATE USER PROFILE
-// UPDATED: Landlord approval gate. Picking "Landlord" no longer sets role =
-// 'landlord' directly — it now REQUIRES 4 verification items
-// (landlord_documents: Proof of Ownership, Local Permits, BIR Registration,
-// and a Selfie holding valid ID — all 4 base64 images joined by '|||', in
-// that exact order) PLUS landlord_doc_name (the name the applicant typed as
-// "printed on their Proof of Ownership document", used by the admin panel
-// for a name cross-check against the registered full_name). Submitting a
-// fresh request flips landlord_status to 'pending', which shows up in the
-// Admin Panel's "Landlord Requests" tab along with the uploaded documents
-// and the name-match indicator for review. Only the admin's approve action
-// (in adminController.js) actually sets role = 'landlord'. The original
-// 30-day personal-info lock logic below is untouched.
+// UPDATED (this version):
+// - Contact is validated server-side: must be an 11-digit PH mobile number
+//   starting with 09 (e.g. 09123456789).
+// - The 30-day personal-info lock now uses its OWN column, info_changed_at,
+//   instead of updated_at. updated_at can be bumped by logins (password hash
+//   upgrade), admin edits, etc., which was starting the lock by accident.
+//   Requires:  ALTER TABLE users ADD COLUMN info_changed_at DATETIME NULL;
+// - First-time setup (dashboard) no longer starts the 30-day timer. It only
+//   starts when name/address/contact are really changed AFTER setup.
+//
+// Landlord approval gate (unchanged): picking "Landlord" doesn't grant the
+// role. It REQUIRES 4 verification images (landlord_documents, joined by
+// '|||': ownership, permits, BIR, selfie-with-ID) PLUS landlord_doc_name,
+// then sets landlord_status = 'pending' for admin review. Only the admin's
+// approve action (adminController.js) sets role = 'landlord'.
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email, landlord_documents, landlord_doc_name } = req.body;
 
@@ -137,14 +140,19 @@ exports.updateProfile = (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid role.' });
     }
 
-    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, landlord_doc_name, updated_at FROM users WHERE id = ?', [req.userId], (err, results) => {
+    // NEW: server-side contact validation (11 digits, starts with 09)
+    if (contact && !/^09\d{9}$/.test(String(contact).trim())) {
+        return res.status(400).json({ success: false, message: 'Contact must be an 11-digit mobile number starting with 09.' });
+    }
+
+    db.query('SELECT full_name, address, contact, role, landlord_status, landlord_documents, landlord_doc_name, info_changed_at FROM users WHERE id = ?', [req.userId], (err, results) => {
         if (err) return res.status(500).json({ error: err.message });
         if (results.length === 0) return res.status(404).json({ success: false, message: 'User not found' });
 
         const user = results[0];
-        const lastUpdate = user.updated_at ? new Date(user.updated_at) : null;
+        const lastChange = user.info_changed_at ? new Date(user.info_changed_at) : null;
         const now = new Date();
-        const diffInDays = lastUpdate ? Math.floor((now - lastUpdate) / (1000 * 60 * 60 * 24)) : 40; 
+        const diffInDays = lastChange ? Math.floor((now - lastChange) / (1000 * 60 * 60 * 24)) : 40;
 
         const hasActuallyChanged = (newVal, oldVal) => {
             const cleanNew = (newVal || "").toString().trim().toLowerCase();
@@ -152,32 +160,19 @@ exports.updateProfile = (req, res) => {
             return cleanNew !== cleanOld;
         };
 
-        const isChangingPersonalInfo = 
-            hasActuallyChanged(full_name, user.full_name) || 
-            hasActuallyChanged(address, user.address) || 
+        const isChangingPersonalInfo =
+            hasActuallyChanged(full_name, user.full_name) ||
+            hasActuallyChanged(address, user.address) ||
             hasActuallyChanged(contact, user.contact);
 
         console.log(`--- Update Attempt for ${email} ---`);
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
-        const isLockedOut = !isFirstTimeSetup && isChangingPersonalInfo && diffInDays < 30;
+        const isLockedOut = !isFirstTimeSetup && isChangingPersonalInfo && lastChange !== null && diffInDays < 30;
 
-        // UPDATED: Decoupled the 30-day personal-info lock from landlord
-        // verification requests. Previously, ANY submission that touched
-        // full_name/address/contact while locked was rejected outright —
-        // including a landlord request, since dashboard.html/home.js resend
-        // those same 3 fields alongside the documents every time. That meant
-        // a returning user requesting landlord status got blocked by this
-        // lock even though they never intended to edit their personal info,
-        // just because the retyped text didn't match the stored value
-        // character-for-character.
-        //
-        // Now:
-        // - A PLAIN personal-info edit (role isn't 'landlord') still gets
-        //   blocked exactly as before if locked — that protection is intact.
-        // - A LANDLORD REQUEST (role === 'landlord', not yet approved) is
-        //   NEVER blocked by this lock. If locked, we simply ignore the
-        //   full_name/address/contact values in this submission (keep the
-        //   existing ones) and still process the role/documents normally.
+        // A PLAIN personal-info edit (role isn't 'landlord') is blocked while
+        // locked. A LANDLORD REQUEST is never blocked by this lock: if locked,
+        // the retyped name/address/contact are ignored (existing values kept)
+        // and the role/documents are still processed normally.
         if (isLockedOut && role !== 'landlord') {
             return res.status(403).json({ 
                 success: false, 
@@ -185,24 +180,16 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        // NEW: when locked but this IS a landlord request, fall back to the
-        // user's existing personal info instead of whatever was retyped in
-        // the form, so the UPDATE below can't silently change it either.
+        // When locked but this IS a landlord request, keep the existing
+        // personal info instead of whatever was retyped in the form.
         const effectiveFullName = isLockedOut ? user.full_name : (full_name || user.full_name);
         const effectiveAddress = isLockedOut ? user.address : (address || user.address);
         const effectiveContact = isLockedOut ? user.contact : (contact || user.contact);
 
-        // NEW: Landlord approval gate logic.
-        // - If the user already has an approved landlord_status, letting them
-        //   keep/select 'landlord' is fine (they were approved previously) —
-        //   no documents required again.
-        // - Otherwise, selecting 'landlord' does NOT grant the role. It
-        //   REQUIRES landlord_documents (4 base64 images joined by '|||':
-        //   ownership, permits, BIR, selfie-with-ID) AND landlord_doc_name
-        //   (the applicant's typed "name on document", used for the admin
-        //   panel's name cross-check) before it will even flip
-        //   landlord_status to 'pending'. Without either, the request is
-        //   rejected outright with a 400.
+        // Landlord approval gate logic.
+        // - Already-approved landlords may keep 'landlord' without re-uploading.
+        // - Otherwise 'landlord' does NOT grant the role; it requires the
+        //   documents + typed owner name, then flips landlord_status to 'pending'.
         let finalRole = role || user.role;
         let finalLandlordStatus = user.landlord_status || 'none';
         let finalLandlordDocs = user.landlord_documents; // unchanged by default
@@ -212,7 +199,7 @@ exports.updateProfile = (req, res) => {
             if (user.landlord_status === 'approved') {
                 finalRole = 'landlord';
             } else {
-                // NEW: require documents for any fresh (non-approved) landlord request
+                // Require documents for any fresh (non-approved) landlord request
                 if (!landlord_documents || landlord_documents.trim() === "") {
                     return res.status(400).json({
                         success: false,
@@ -220,7 +207,7 @@ exports.updateProfile = (req, res) => {
                     });
                 }
 
-                // NEW: require the typed owner name for the admin's name cross-check
+                // Require the typed owner name for the admin's name cross-check
                 if (!landlord_doc_name || landlord_doc_name.trim() === "") {
                     return res.status(400).json({
                         success: false,
@@ -228,11 +215,7 @@ exports.updateProfile = (req, res) => {
                     });
                 }
 
-                // NEW: basic sanity check the payload isn't absurdly oversized
-                // for the DB (same pattern as listing image guards elsewhere).
-                // Raised slightly from the original 20MB to 25MB now that a
-                // 4th image (the ID selfie) is included in the same combined
-                // payload.
+                // Sanity check the combined payload size
                 const approxSizeMB = Buffer.byteLength(landlord_documents, 'utf8') / (1024 * 1024);
                 if (approxSizeMB > 25) {
                     return res.status(413).json({
@@ -248,13 +231,11 @@ exports.updateProfile = (req, res) => {
             }
         }
 
-        // NEW: only bump updated_at if the personal info actually got applied
-        // this time (i.e. NOT skipped due to the lock). If we ignored the
-        // retyped info because of isLockedOut, the original updated_at should
-        // keep counting down to the same 30-day mark as before — otherwise a
-        // landlord request would keep resetting the timer forever and the
-        // lock would never actually expire.
-        const timestampSQL = (isChangingPersonalInfo && !isLockedOut) ? 'updated_at = NOW()' : 'updated_at = updated_at';
+        // The 30-day timer only starts when personal info is really changed
+        // AFTER first-time setup, and only if that change was actually applied.
+        const timestampSQL = (isChangingPersonalInfo && !isLockedOut && !isFirstTimeSetup)
+            ? 'info_changed_at = NOW()'
+            : 'info_changed_at = info_changed_at';
         const sql = `UPDATE users SET full_name = ?, address = ?, contact = ?, role = ?, landlord_status = ?, landlord_documents = ?, landlord_doc_name = ?, ${timestampSQL} WHERE id = ?`;
         
         db.query(sql, [
@@ -269,26 +250,21 @@ exports.updateProfile = (req, res) => {
         ], (err, result) => {
             if (err) return res.status(500).json({ error: err.message });
 
-            // NEW: the landlord's name/contact/status are shown on every one
-            // of their cached listings, so drop the cache after a profile save.
+            // The landlord's name/contact/status are shown on every one of
+            // their cached listings, so drop the cache after a profile save.
             listingsCache.clear();
 
-            // NEW: build a message that also tells the user if their
-            // personal-info edits were skipped this time because of the lock,
-            // so they aren't confused about why their retyped address/contact
-            // didn't seem to "stick."
             let message;
             if (role === 'landlord' && finalLandlordStatus === 'pending') {
                 message = isLockedOut
-                    ? `Landlord request and documents submitted! (Note: your personal info edits were not applied — you can change those again in ${30 - diffInDays} more days.) Waiting for admin approval.`
+                    ? `Landlord request and documents submitted! (Note: your personal info edits were not applied. You can change those again in ${30 - diffInDays} more days.) Waiting for admin approval.`
                     : 'Landlord request and documents submitted! Waiting for admin approval.';
             } else {
                 message = 'Profile updated successfully';
             }
 
-            // NEW: role and landlord_status are sent back so the frontend
-            // (dashboard.js / home.js) knows the REAL outcome instead of
-            // assuming whatever the user picked was granted.
+            // role and landlord_status are sent back so the frontend knows
+            // the REAL outcome instead of assuming what the user picked.
             res.json({ 
                 success: true, 
                 message,
