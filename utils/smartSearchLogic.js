@@ -3,14 +3,14 @@
 // Shared "Smart Search" query parser + matcher, used by BOTH:
 //  - controllers/userController.js's smartSearch export (POST /api/smart-search)
 //  - controllers/searchController.js's smartSearchSuggestions export
-//    (POST /api/smart-search/suggestions) - NEW, powers the zero-result nudge
+//    (POST /api/smart-search/suggestions) - powers the zero-result nudge
 //
 // Exported functions: parseSmartSearchQuery and runSmartSearch keep the exact
 // same signatures as before, so userController.js needs NO changes.
-// NEW export: suggestFallbacks(rawQuery, rows, role, userId).
+// Also exports: suggestFallbacks(rawQuery, rows, role, userId).
 //
 // ============================================================================
-// WHAT THIS UNDERSTANDS NOW
+// WHAT THIS UNDERSTANDS
 // ============================================================================
 //   "house malapit sa eu"        -> category MUST be House, ranks by "eu"
 //   "apartment na may wifi"      -> category MUST be Apartment, has wifi
@@ -23,22 +23,21 @@
 //   "30 sqm condo"               -> size >= 30, category = Condo
 //   "aparment na may wefi"       -> typos auto-corrected to apartment/wifi
 //
-// FIXED in this version: the price / room / size phrases ("under 5000",
-// "3 bedrooms", "30 sqm") used to be parsed into filters but their leftover
-// words ("under", "bedrooms", "sqm") were ALSO kept as keywords. Since no
-// listing contains the word "under" or "sqm", queries like "house under 5000"
-// or "30 sqm condo" returned zero results even when matching listings
-// existed. The matched phrases are now removed from the text before it is
-// split into keywords.
+// FIXED earlier: price / room / size phrases ("under 5000", "3 bedrooms",
+// "30 sqm") are removed from the text before it is split into keywords.
+//
+// FIXED in this version:
+//   1. Typos in the property type ("bedsapce", "aparment") are now corrected
+//      BEFORE the category check, so they become a hard category filter
+//      instead of an ordinary keyword.
+//   2. Keywords are now matched with AND (every keyword must match somewhere
+//      in title / location / amenities / category). Before, matching ONE
+//      keyword was enough, so "bedspace in malabanban sur" also returned
+//      bedspaces from other places.
 // ============================================================================
 
 // ---------------------------------------------------------------------------
 // 1. STOPWORDS
-// Common Tagalog/English connector + conversational filler words that never
-// correspond to actual listing content. Without stripping these, a strict
-// "every word must match" search could never find anything, since words like
-// "malapit"/"sa"/"na"/"may"/"can you show me" never appear in a listing's
-// title/location/category/amenities.
 // ---------------------------------------------------------------------------
 const STOPWORDS = new Set([
     // Tagalog connectors / particles
@@ -49,11 +48,10 @@ const STOPWORDS = new Set([
     'maaari', 'maaaring', 'bang', 'eh', 'pala', 'talaga', 'nyo', 'niyo',
     // English connectors
     'the', 'a', 'an', 'in', 'for', 'of', 'to', 'with', 'near', 'is', 'are', 'that', 'has',
-    // Conversational filler ("can you show me a house...", "I need an apartment...")
+    // Conversational filler
     'can', 'you', 'show', 'me', 'find', 'looking', 'need', 'want', 'give', 'get',
     'search', 'searching', 'please', 'pls', 'there', 'any', 'some', 'i', 'im', "i'm",
-    // NEW: price/size comparison leftovers + generic nouns that are never
-    // a meaningful thing to match against a listing's text
+    // Price/size comparison leftovers + generic nouns
     'under', 'below', 'above', 'over', 'less', 'than', 'more', 'higher', 'hanggang',
     'pababa', 'pataas', 'or', 'and', 'php', 'sqm',
     'room', 'rooms', 'unit', 'place', 'property', 'stay', 'stays', 'rent', 'rental', 'upa'
@@ -61,9 +59,6 @@ const STOPWORDS = new Set([
 
 // ---------------------------------------------------------------------------
 // 2. PROPERTY TYPE DETECTION (hard filter, not a fuzzy keyword)
-// If the query names a property type, we filter listings.category directly
-// instead of just hoping the word shows up somewhere in the text. This is
-// far more precise than treating "house" as just another keyword.
 // ---------------------------------------------------------------------------
 const CATEGORY_TERMS = {
     'house': 'house', 'houses': 'house', 'bahay': 'house',
@@ -75,14 +70,12 @@ const CATEGORY_TERMS = {
 
 // ---------------------------------------------------------------------------
 // 3. AMENITY / FEATURE SYNONYMS
-// Informal, Tagalog, or misspelled terms mapped to the canonical word that
-// actually shows up in a listing's amenities text.
 // ---------------------------------------------------------------------------
 const SYNONYMS = {
     'wifi': 'wifi', 'internet': 'wifi', 'wai-fi': 'wifi',
     'aircon': 'aircon', 'ac': 'aircon', 'aircondition': 'aircon', 'airconditioned': 'aircon',
     'parking': 'parking', 'carpark': 'parking', 'paradahan': 'parking',
-    'kitchen': 'kitchen', 'ketchen': 'kitchen', // "dirty kitchen" - separate cooking area
+    'kitchen': 'kitchen', 'ketchen': 'kitchen',
     'furnished': 'furnished', 'furnish': 'furnished', 'fully-furnished': 'furnished',
     'cctv': 'cctv', 'camera': 'cctv',
     'security': 'security', 'guard': 'security',
@@ -94,8 +87,6 @@ const SYNONYMS = {
 
 // ---------------------------------------------------------------------------
 // 4. SORT-INTENT WORDS
-// These change HOW results are ordered instead of being literal keywords to
-// search for, so they're pulled out of the query separately.
 // ---------------------------------------------------------------------------
 const CHEAP_TERMS = new Set(['cheap', 'cheapest', 'mura', 'pinakamura', 'murang', 'budget', 'affordable']);
 const EXPENSIVE_TERMS = new Set(['expensive', 'mahal', 'pinakamahal', 'premium', 'luxury', 'luxurious']);
@@ -103,10 +94,8 @@ const BIG_TERMS = new Set(['big', 'biggest', 'large', 'malaki', 'pinakamalaki', 
 
 // ---------------------------------------------------------------------------
 // 5. TYPO-TOLERANCE (fuzzy matching)
-// A lightweight Levenshtein edit-distance check so common misspellings still
-// resolve to the right term, even ones not explicitly listed in SYNONYMS.
 // Only runs on words 4+ letters long so short, legitimate location keywords
-// (like "eu", "up") never get mangled.
+// (like "eu", "up", "sur") never get mangled.
 // ---------------------------------------------------------------------------
 const KNOWN_VOCAB = [
     'house', 'apartment', 'condo', 'bedspace', 'dorm', 'dormitory',
@@ -125,8 +114,8 @@ function levenshtein(a, b) {
         for (let j = 1; j <= n; j++) {
             const cost = a[i - 1] === b[j - 1] ? 0 : 1;
             dp[i][j] = Math.min(
-                dp[i - 1][j] + 1,      // deletion
-                dp[i][j - 1] + 1,      // insertion
+                dp[i - 1][j] + 1,       // deletion
+                dp[i][j - 1] + 1,       // insertion
                 dp[i - 1][j - 1] + cost // substitution
             );
         }
@@ -154,15 +143,12 @@ function fuzzyCorrect(word) {
 
 // ---------------------------------------------------------------------------
 // 6. QUERY PARSER
-// Pulls price / room count / size / property type / sort intent out of the
-// raw typed query, and returns whatever meaningful keywords are left over.
 // ---------------------------------------------------------------------------
 function parseSmartSearchQuery(rawQuery) {
     const lowerQuery = (rawQuery || "").toLowerCase().trim();
 
-    // NEW: working copy of the query. Every phrase that gets turned into a
-    // filter below (price / rooms / size) is cut out of this copy, so its
-    // leftover words never get mistaken for keywords later on.
+    // Working copy: every phrase turned into a filter below (price / rooms /
+    // size) is cut out of this copy so its leftover words never become keywords.
     let working = lowerQuery;
 
     // --- PRICE FILTERS: "under 5000", "below ₱5k", "5k pababa", "over 3000" ---
@@ -204,11 +190,14 @@ function parseSmartSearchQuery(rawQuery) {
     const rawWords = working.split(/\s+/).filter(w => w.length > 1);
 
     // --- PROPERTY TYPE: pulled out as a hard filter, not a soft keyword ---
+    // FIX: typo-tolerant. "bedsapce" -> "bedspace", "aparment" -> "apartment"
+    // BEFORE checking the category table.
     let categoryFilter = null;
     const afterCategory = [];
     for (const word of rawWords) {
-        if (!categoryFilter && CATEGORY_TERMS[word]) {
-            categoryFilter = CATEGORY_TERMS[word];
+        const corrected = CATEGORY_TERMS[word] ? word : fuzzyCorrect(word);
+        if (!categoryFilter && CATEGORY_TERMS[corrected]) {
+            categoryFilter = CATEGORY_TERMS[corrected];
             continue; // consumed - don't also treat it as a generic keyword
         }
         afterCategory.push(word);
@@ -239,14 +228,11 @@ function parseSmartSearchQuery(rawQuery) {
 // ---------------------------------------------------------------------------
 // 7. MATCHER + RANKER
 // Filters rows against an ALREADY-PARSED query, scores each surviving row by
-// weighted relevance (title matches count more than amenities, which count
-// more than location), then sorts - either by the detected sort intent
+// weighted relevance, then sorts - either by the detected sort intent
 // (cheapest/biggest/etc.) or by relevance score.
 //
-// NEW: this used to live inline inside runSmartSearch(). It was split out so
-// suggestFallbacks() below can re-run the same matching logic against
-// "relaxed" versions of a parsed query (e.g. the same search without the
-// price limit) without duplicating any of it.
+// Split out of runSmartSearch() so suggestFallbacks() below can re-run the
+// same matching against "relaxed" versions of a parsed query.
 // ---------------------------------------------------------------------------
 function applyParsedSearch(parsed, rows, role, userId) {
     const { maxPrice, minPrice, minRooms, minSize, categoryFilter, sortBy, keywords } = parsed;
@@ -262,8 +248,7 @@ function applyParsedSearch(parsed, rows, role, userId) {
     }
 
     const scored = rows.map(row => {
-        // Role security: landlords only ever see their own listings, same as
-        // the regular Browse view.
+        // Role security: landlords only ever see their own listings.
         const isOwner = (role === 'landlord') ? String(row.user_id) === String(userId) : true;
         if (!isOwner) return null;
 
@@ -279,20 +264,22 @@ function applyParsedSearch(parsed, rows, role, userId) {
         const location = (row.location || "").toLowerCase();
         const amenities = (row.amenities || "").toLowerCase();
 
-        // Weighted relevance: a match in the title matters more than one
-        // buried in amenities, which matters more than a generic match.
+        // Weighted relevance: title > amenities/location > category.
+        // FIX: track whether EVERY keyword matched somewhere (AND logic).
         let score = 0;
+        let matchedAll = true;
         keywords.forEach(word => {
-            if (title.includes(word)) score += 3;
-            if (amenities.includes(word)) score += 2;
-            if (location.includes(word)) score += 2;
-            if (category.includes(word)) score += 1;
+            let hit = false;
+            if (title.includes(word)) { score += 3; hit = true; }
+            if (amenities.includes(word)) { score += 2; hit = true; }
+            if (location.includes(word)) { score += 2; hit = true; }
+            if (category.includes(word)) { score += 1; hit = true; }
+            if (!hit) matchedAll = false;
         });
 
-        // If the user typed meaningful keywords, require at least one match.
-        // If they only used price/room/size/category/sort filters, a score
-        // of 0 is fine - the hard filters above already did the work.
-        if (keywords.length > 0 && score === 0) return null;
+        // Every keyword must match somewhere. Price/room/size/category/sort
+        // filters were already applied above.
+        if (keywords.length > 0 && !matchedAll) return null;
 
         return { row, score };
     }).filter(Boolean);
@@ -313,14 +300,9 @@ function runSmartSearch(rawQuery, rows, role, userId) {
 }
 
 // ---------------------------------------------------------------------------
-// 8. ZERO-RESULT FALLBACKS (NEW)
-// When a query finds nothing, this works out WHICH part of it was too strict
-// by re-running it with one constraint loosened at a time. It only returns
-// loosened versions that actually find something, each with:
-//   - label: short text for the button the person sees
-//   - query: a plain-text query the frontend can send straight back to
-//            POST /api/smart-search (rebuilt from the loosened filters)
-//   - count: how many stays that loosened search finds
+// 8. ZERO-RESULT FALLBACKS
+// When a query finds nothing, re-run it with one constraint loosened at a
+// time and return only the loosened versions that actually find something.
 // At most 3 are returned, ordered from "loosest change" to "biggest change".
 // ---------------------------------------------------------------------------
 function buildQueryFromParsed(p) {
