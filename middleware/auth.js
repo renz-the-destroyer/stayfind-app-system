@@ -50,6 +50,25 @@ exports.requireUser = (req, res, next) => {
     }
 };
 
+// NEW (guest mode): for PUBLIC routes that show a bit more to logged-in people.
+// A valid token sets req.userId, exactly like requireUser. No token, or a bad
+// or expired one, simply means "guest": req.userId stays undefined and the
+// request continues. It never answers 401.
+exports.optionalUser = (req, res, next) => {
+    const header = req.headers['authorization'] || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+
+    if (token) {
+        try {
+            const payload = jwt.verify(token, getSecret());
+            if (payload.typ === 'user') req.userId = Number(payload.sub);
+        } catch (err) {
+            /* invalid or expired token: treat as a guest */
+        }
+    }
+    next();
+};
+
 // Protects the /api/admin routes (token comes in the x-admin-key header).
 exports.requireAdmin = (req, res, next) => {
     const token = req.headers['x-admin-key'];
