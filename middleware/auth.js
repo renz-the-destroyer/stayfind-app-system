@@ -4,9 +4,8 @@
 //
 // - Users get a token (7 days) from POST /api/login and POST /api/add.
 //   The frontend sends it as:  Authorization: Bearer <token>
-// - Admins get a token (8 hours) from POST /api/admin/login. admin.js already
-//   sends whatever the login returned in the `x-admin-key` header, so the
-//   admin panel needs NO changes.
+// - Admins get a token (2 hours) from POST /api/admin/login. admin.js sends
+//   whatever the login returned in the `x-admin-key` header.
 //
 // Needs ONE environment variable: JWT_SECRET (a long random string, 32+ chars).
 // Generate one with:
@@ -15,7 +14,9 @@
 const jwt = require('jsonwebtoken');
 
 const USER_TOKEN_TTL = '7d';
-const ADMIN_TOKEN_TTL = '8h';
+// UPDATED (Module 5): was '8h'. A shorter admin session limits the damage if a
+// token is ever stolen or an admin walks away from a signed-in computer.
+const ADMIN_TOKEN_TTL = '2h';
 
 function getSecret() {
     const secret = process.env.JWT_SECRET;
