@@ -15,6 +15,9 @@ router.use(adminController.verifyAdminKey);
 // NEW: audit trail (must come AFTER the token check so req.adminId exists)
 router.use(auditAdminActions);
 
+// NEW (Module 4): who is signed in (name + email) - powers the top bar
+router.get('/me', adminController.getMe);
+
 // Dashboard
 router.get('/stats', adminController.getStats);
 // NEW: charts + breakdowns for the Overview panel
