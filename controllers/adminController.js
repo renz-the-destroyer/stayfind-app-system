@@ -534,3 +534,21 @@ exports.deleteListingAdmin = (req, res) => {
         res.json({ success: true, message: 'Listing deleted successfully' });
     });
 };
+
+// ============================================================================
+//  MODULE 4 - who am I? (GET /api/admin/me)
+// ============================================================================
+// Returns the name and email of the admin the token belongs to, read from the
+// database (never from the request), so the top bar is always correct.
+// If the admin account was deleted while the token was still valid, this
+// answers 401 so the panel signs that person out instead of leaving a
+// "ghost" session open.
+exports.getMe = (req, res) => {
+    db.query('SELECT id, full_name, email FROM admins WHERE id = ? LIMIT 1', [req.adminId], (err, rows) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (rows.length === 0) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: this admin account no longer exists.' });
+        }
+        res.json({ success: true, admin: rows[0] });
+    });
+};
