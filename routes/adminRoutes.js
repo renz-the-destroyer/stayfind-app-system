@@ -25,10 +25,11 @@ router.get('/overview', adminController.getOverview);
 // NEW: Activity Log panel
 router.get('/audit-log', adminController.getAuditLog);
 
-// Users
+// Users - view/edit and suspend/unsuspend. NO delete (Module 7).
 router.get('/users', adminController.getAllUsersAdmin);
 router.put('/users/:id', adminController.updateUserAdmin);
-router.delete('/users/:id', adminController.deleteUserAdmin);
+router.post('/users/:id/suspend', adminController.suspendUser);
+router.post('/users/:id/unsuspend', adminController.unsuspendUser);
 
 // Landlord approval workflow
 router.get('/landlord-requests', adminController.getLandlordRequests);
@@ -37,10 +38,10 @@ router.get('/landlord-requests/:id/documents', adminController.getLandlordReques
 router.post('/landlord-requests/:id/approve', adminController.approveLandlord);
 router.post('/landlord-requests/:id/reject', adminController.rejectLandlord);
 
-// Listings
+// Listings - view and hide/unhide only. NO edit and NO delete (Module 7).
 router.get('/listings', adminController.getAllListingsAdmin);
-router.put('/listings/:id', adminController.updateListingAdmin);
-router.delete('/listings/:id', adminController.deleteListingAdmin);
+router.post('/listings/:id/hide', adminController.hideListing);
+router.post('/listings/:id/unhide', adminController.unhideListing);
 
 // Reviews (moderation)
 router.get('/reviews', adminController.getAllReviewsAdmin);
