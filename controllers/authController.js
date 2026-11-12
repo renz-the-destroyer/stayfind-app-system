@@ -2,16 +2,13 @@
 //
 // POST /api/login
 // Body: { email, password }
-// Returns: { success: true, user } on success (user WITHOUT password or
+// Returns: { success: true, user, token } on success (user WITHOUT password or
 // landlord_documents), or 401 { success: false, message } on failure.
 //
-// Passwords are checked on the SERVER now. The browser never receives the
-// users table anymore.
+// Passwords are checked on the SERVER. Existing accounts with plain-text
+// passwords are upgraded to bcrypt the first time their owner signs in.
 //
-// Existing accounts still have plain-text passwords in the DB. On a
-// successful login with a plain-text password, it is hashed with bcrypt and
-// saved right then, so every account upgrades itself the first time its
-// owner signs in - no migration script needed.
+// NEW (Module 7): a suspended account gets 403 with the admin's reason.
 
 const bcrypt = require('bcryptjs');
 const db = require('../config/db');
@@ -60,8 +57,17 @@ exports.login = (req, res) => {
 
         if (!ok) return invalid();
 
+        // NEW (Module 7): only someone who knows the password learns about the suspension.
+        if (Number(user.is_suspended) === 1) {
+            const why = user.suspended_reason ? ` Reason: ${user.suspended_reason}` : '';
+            return res.status(403).json({ success: false, message: 'Your account has been suspended.' + why });
+        }
+
         delete user.password;
         delete user.landlord_documents; // big base64 blobs the browser never needs
+        delete user.is_suspended;
+        delete user.suspended_reason;
+        delete user.suspended_at;
 
         let token;
         try {
