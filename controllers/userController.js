@@ -1,34 +1,14 @@
 const db = require('../config/db');
-// NEW: password hashing for sign up (see createUser below)
 const bcrypt = require('bcryptjs');
 const { signUserToken } = require('../middleware/auth');
-// NEW: Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
-// Used here AND in server.js so both stay in sync.
+// Shared Taglish-aware Smart Search logic (see utils/smartSearchLogic.js).
 const { runSmartSearch } = require('../utils/smartSearchLogic');
-// NEW: in-memory cache for GET /api/view - see utils/listingsCache.js for
-// the full explanation of the TTL + clear-on-write strategy.
+// In-memory cache for GET /api/view - see utils/listingsCache.js.
 const listingsCache = require('../utils/listingsCache');
 
-// 1. GET ALL USERS
-// UPDATED: no longer reachable - the GET /users route was removed because it
-// sent every user's password to the browser (login is now POST /api/login in
-// authController.js). Kept here, but it strips sensitive columns just in case
-// it ever gets wired up again.
-exports.getAllUsers = (req, res) => {
-    const sql = "SELECT * FROM users";
-    db.query(sql, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        const safeRows = rows.map(({ password, landlord_documents, ...rest }) => rest);
-        res.json(safeRows);
-    });
-};
-
-// 2. CREATE NEW USER (Used for Sign Up)
-// UPDATED:
+// 1. CREATE NEW USER (Used for Sign Up)
 // - the password is stored as a bcrypt hash, never plain text
-// - role is ALWAYS 'pending' here. The old version trusted whatever role the
-//   browser sent, so anyone could register as 'landlord' and skip the admin
-//   approval flow.
+// - role is ALWAYS 'pending' here (the browser can't pick 'landlord')
 // - duplicate emails are rejected
 // - returns a login token so the new user can go straight to the dashboard
 exports.createUser = (req, res) => {
@@ -68,41 +48,8 @@ exports.createUser = (req, res) => {
     });
 };
 
-// 3. UPDATE USER
-// (No longer reachable - the PUT /update route was removed because it had no
-// auth. Kept here for now; safe to delete later.)
-exports.updateUser = (req, res) => {
-    const { id, full_name, email, role } = req.body;
-    const sql = `UPDATE users SET full_name = ?, email = ?, role = ? WHERE id = ?`;
-    db.query(sql, [full_name, email, role, id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows > 0) {
-            listingsCache.clear(); // NEW: landlord_name shown on cached listings may have just changed
-            res.json({ success: true, message: 'User Updated Successfully' });
-        } else {
-            res.status(404).json({ message: 'User not found' });
-        }
-    });
-};
-
-// 4. DELETE USER
-// (No longer reachable - the DELETE /delete route was removed because it had
-// no auth. Kept here for now; safe to delete later.)
-exports.deleteUser = (req, res) => {
-    const { id } = req.body;
-    db.query('DELETE FROM users WHERE id = ?', [id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows > 0) {
-            listingsCache.clear(); // NEW: this user's listings may no longer appear in /api/view
-            res.json({ success: true, message: 'User Deleted Successfully' });
-        } else {
-            res.status(404).json({ message: 'User not found' });
-        }
-    });
-};
-
-// 5. SEARCH BY ID
-// UPDATED: never returns the password or the landlord verification documents.
+// 2. SEARCH BY ID
+// Never returns the password or the landlord verification documents.
 exports.getUserById = (req, res) => {
     const id = req.params.id;
     // Only your own profile - nobody can read another user's details by id.
@@ -115,32 +62,23 @@ exports.getUserById = (req, res) => {
     });
 };
 
-// 6. UPDATE USER PROFILE
-// UPDATED (this version):
-// - Contact is validated server-side: must be an 11-digit PH mobile number
-//   starting with 09 (e.g. 09123456789).
-// - The 30-day personal-info lock now uses its OWN column, info_changed_at,
-//   instead of updated_at. updated_at can be bumped by logins (password hash
-//   upgrade), admin edits, etc., which was starting the lock by accident.
+// 3. UPDATE USER PROFILE
+// - Contact must be an 11-digit PH mobile number starting with 09.
+// - The 30-day personal-info lock uses its OWN column, info_changed_at.
 //   Requires:  ALTER TABLE users ADD COLUMN info_changed_at DATETIME NULL;
-// - First-time setup (dashboard) no longer starts the 30-day timer. It only
-//   starts when name/address/contact are really changed AFTER setup.
+// - First-time setup (dashboard) doesn't start the 30-day timer.
 //
-// Landlord approval gate (unchanged): picking "Landlord" doesn't grant the
-// role. It REQUIRES 4 verification images (landlord_documents, joined by
-// '|||': ownership, permits, BIR, selfie-with-ID) PLUS landlord_doc_name,
-// then sets landlord_status = 'pending' for admin review. Only the admin's
-// approve action (adminController.js) sets role = 'landlord'.
+// Landlord approval gate: picking "Landlord" doesn't grant the role. It REQUIRES
+// 4 verification images (landlord_documents, joined by '|||') PLUS
+// landlord_doc_name, then sets landlord_status = 'pending' for admin review.
+// Only the admin's approve action (adminController.js) sets role = 'landlord'.
 exports.updateProfile = (req, res) => {
     const { full_name, address, contact, role, email, landlord_documents, landlord_doc_name } = req.body;
 
-    // Only these two roles can be requested here. 'landlord' still goes through
-    // the document + admin approval gate below.
     if (role && !['tenant', 'landlord'].includes(role)) {
         return res.status(400).json({ success: false, message: 'Invalid role.' });
     }
 
-    // NEW: server-side contact validation (11 digits, starts with 09)
     if (contact && !/^09\d{9}$/.test(String(contact).trim())) {
         return res.status(400).json({ success: false, message: 'Contact must be an 11-digit mobile number starting with 09.' });
     }
@@ -169,10 +107,8 @@ exports.updateProfile = (req, res) => {
         const isFirstTimeSetup = (!user.address || user.address.trim() === "") || (!user.contact || user.contact.trim() === "");
         const isLockedOut = !isFirstTimeSetup && isChangingPersonalInfo && lastChange !== null && diffInDays < 30;
 
-        // A PLAIN personal-info edit (role isn't 'landlord') is blocked while
-        // locked. A LANDLORD REQUEST is never blocked by this lock: if locked,
-        // the retyped name/address/contact are ignored (existing values kept)
-        // and the role/documents are still processed normally.
+        // A PLAIN personal-info edit is blocked while locked. A LANDLORD REQUEST is
+        // never blocked: if locked, the retyped name/address/contact are ignored.
         if (isLockedOut && role !== 'landlord') {
             return res.status(403).json({ 
                 success: false, 
@@ -180,16 +116,10 @@ exports.updateProfile = (req, res) => {
             });
         }
 
-        // When locked but this IS a landlord request, keep the existing
-        // personal info instead of whatever was retyped in the form.
         const effectiveFullName = isLockedOut ? user.full_name : (full_name || user.full_name);
         const effectiveAddress = isLockedOut ? user.address : (address || user.address);
         const effectiveContact = isLockedOut ? user.contact : (contact || user.contact);
 
-        // Landlord approval gate logic.
-        // - Already-approved landlords may keep 'landlord' without re-uploading.
-        // - Otherwise 'landlord' does NOT grant the role; it requires the
-        //   documents + typed owner name, then flips landlord_status to 'pending'.
         let finalRole = role || user.role;
         let finalLandlordStatus = user.landlord_status || 'none';
         let finalLandlordDocs = user.landlord_documents; // unchanged by default
@@ -199,7 +129,6 @@ exports.updateProfile = (req, res) => {
             if (user.landlord_status === 'approved') {
                 finalRole = 'landlord';
             } else {
-                // Require documents for any fresh (non-approved) landlord request
                 if (!landlord_documents || landlord_documents.trim() === "") {
                     return res.status(400).json({
                         success: false,
@@ -207,7 +136,6 @@ exports.updateProfile = (req, res) => {
                     });
                 }
 
-                // Require the typed owner name for the admin's name cross-check
                 if (!landlord_doc_name || landlord_doc_name.trim() === "") {
                     return res.status(400).json({
                         success: false,
@@ -215,7 +143,6 @@ exports.updateProfile = (req, res) => {
                     });
                 }
 
-                // Sanity check the combined payload size
                 const approxSizeMB = Buffer.byteLength(landlord_documents, 'utf8') / (1024 * 1024);
                 if (approxSizeMB > 25) {
                     return res.status(413).json({
@@ -231,8 +158,6 @@ exports.updateProfile = (req, res) => {
             }
         }
 
-        // The 30-day timer only starts when personal info is really changed
-        // AFTER first-time setup, and only if that change was actually applied.
         const timestampSQL = (isChangingPersonalInfo && !isLockedOut && !isFirstTimeSetup)
             ? 'info_changed_at = NOW()'
             : 'info_changed_at = info_changed_at';
@@ -263,8 +188,6 @@ exports.updateProfile = (req, res) => {
                 message = 'Profile updated successfully';
             }
 
-            // role and landlord_status are sent back so the frontend knows
-            // the REAL outcome instead of assuming what the user picked.
             res.json({ 
                 success: true, 
                 message,
@@ -275,53 +198,41 @@ exports.updateProfile = (req, res) => {
     });
 };
 
-// 7. GET ALL LISTINGS (Strict Landlord Filtering + Pagination)
-// UPDATED: each row still carries avg_rating and review_count via the same
-// two correlated subqueries as before:
-//   - avg_rating: the mean of `rating` across rows that actually have a star
-//     rating (rating > 0), so text-only comments and landlord replies
-//     (rating = 0) never drag the average down. COALESCE'd to 0 for
-//     listings with no ratings yet.
-//   - review_count: the total number of rows in `reviews` for this listing
-//     (matches what the details modal already shows via revCount, which
-//     uses reviews.length from GET /get-reviews/:listing_id - comments and
-//     replies both count there too).
+// 4. GET ALL LISTINGS (Pagination + landlord scoping + visibility rules)
+// Each row carries avg_rating and review_count via correlated subqueries.
+// Responds with { listings, page, limit, total, totalPages, hasMore }.
+// `all=true` skips pagination and returns every matching listing.
 //
-// NEW: this endpoint used to return every matching listing - with every
-// embedded base64 photo - in a single response, which gets slow and heavy
-// as the listings table grows. It now paginates via `page`/`limit` query
-// params (defaults: page=1, limit=12, capped at 48/page) and always
-// responds with { listings, page, limit, total, totalPages, hasMore }
-// instead of a bare array, so home.js can show a "Load More" control and
-// know when it's reached the end.
-//
-// Pass `all=true` to skip pagination and get every matching listing back in
-// one response (still shaped the same way, with totalPages: 1). home.js
-// uses this for the Saved view and anywhere else that needs the complete
-// list in memory to filter correctly - paginating those would mean a saved
-// listing on page 2 silently not showing up until "Load More" was clicked.
-//
-// NEW (verified badge): rows now also carry u.landlord_status. home.js's
-// buildVerifiedBadgeHTML() reads item.landlord_status to decide whether to
-// show the "Verified" badge, but this query never selected that column, so
-// the badge could never appear.
+// NEW (Module 7) visibility rules:
+//   - The public feed NEVER includes listings an admin hid, or listings of
+//     suspended landlords.
+//   - A landlord looking at their OWN listings (role=landlord&user_id=<them>,
+//     confirmed against the login token) also gets their hidden ones, with
+//     is_hidden / hidden_reason, so they can see what was hidden and why.
 exports.getAllListings = (req, res) => {
     const { role, user_id, page, limit, all } = req.query;
 
-    // NEW: serve straight from the in-memory cache when there's a fresh
-    // entry for this exact combination of role/user_id/page/limit/all - no
-    // DB round trip at all for a cache hit.
-    const cached = listingsCache.get(req.query);
+    // The token (req.userId), not the query string, decides who is "the owner".
+    const ownerView = role === 'landlord' && !!user_id && !!req.userId && String(req.userId) === String(user_id);
+
+    // `owner` is part of the cache key so the owner's view is never served to anyone else.
+    const cacheQuery = { ...req.query, owner: ownerView ? '1' : '' };
+    const cached = listingsCache.get(cacheQuery);
     if (cached) return res.json(cached);
 
-    let whereClause = '';
-    let whereParams = [];
+    const conditions = [];
+    const whereParams = [];
 
-    // Filter logic: If role is landlord, they ONLY see listings where they are the owner
+    // Filter logic: if role is landlord, they ONLY see listings where they are the owner
     if (role === 'landlord' && user_id) {
-        whereClause = ' WHERE l.user_id = ?';
+        conditions.push('l.user_id = ?');
         whereParams.push(user_id);
     }
+    if (!ownerView) {
+        conditions.push('l.is_hidden = 0');
+        conditions.push('u.is_suspended = 0');
+    }
+    const whereClause = conditions.length ? ' WHERE ' + conditions.join(' AND ') : '';
 
     const baseSelect = `
         SELECT l.*, u.full_name AS landlord_name, u.contact AS landlord_contact, u.email AS landlord_email,
@@ -336,7 +247,7 @@ exports.getAllListings = (req, res) => {
         db.query(baseSelect, whereParams, (err, rows) => {
             if (err) return res.status(500).json({ error: err.message });
             const payload = { listings: rows, page: 1, limit: rows.length, total: rows.length, totalPages: 1, hasMore: false };
-            listingsCache.set(req.query, payload); // NEW
+            listingsCache.set(cacheQuery, payload);
             res.json(payload);
         });
         return;
@@ -346,7 +257,7 @@ exports.getAllListings = (req, res) => {
     const pageSize = Math.min(48, Math.max(1, parseInt(limit) || 12));
     const offset = (pageNum - 1) * pageSize;
 
-    const countSql = `SELECT COUNT(*) AS total FROM listings l${whereClause}`;
+    const countSql = `SELECT COUNT(*) AS total FROM listings l JOIN users u ON l.user_id = u.id${whereClause}`;
     db.query(countSql, whereParams, (countErr, countRows) => {
         if (countErr) return res.status(500).json({ error: countErr.message });
         const total = countRows[0].total;
@@ -362,22 +273,20 @@ exports.getAllListings = (req, res) => {
                 totalPages: Math.max(1, Math.ceil(total / pageSize)),
                 hasMore: offset + rows.length < total
             };
-            listingsCache.set(req.query, payload); // NEW
+            listingsCache.set(cacheQuery, payload);
             res.json(payload);
         });
     });
 };
 
-// 8. ADD NEW LISTING
-// UPDATED: the owner comes from the login token (req.userId), not from the
-// request body, and only a user whose role is 'landlord' (set by admin
-// approval) can post. Also accepts/saves `status` ('available' | 'occupied').
+// 5. ADD NEW LISTING
+// The owner comes from the login token (req.userId), and only a user whose role
+// is 'landlord' (set by admin approval) can post.
 exports.addListing = (req, res) => {
     const { title, category, price, location, rooms, size, amenities, images, thumbnail, status } = req.body;
     const user_id = req.userId;
     const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
-    // Friendly guard for oversized photo payloads (see the Cloudinary note in home.js).
     if (images) {
         const approxSizeMB = Buffer.byteLength(images, 'utf8') / (1024 * 1024);
         if (approxSizeMB > 15) {
@@ -400,19 +309,17 @@ exports.addListing = (req, res) => {
         const values = [user_id, title, category, price, location, rooms, size, amenities, images, thumbnail, finalStatus];
 
         db.query(sql, values, (err, result) => {
-            // `message` is included (besides `error`) because home.js shows errResult.message.
             if (err) return res.status(500).json({ success: false, error: err.message, message: err.message });
-            listingsCache.clear(); // a new listing exists now - don't let a cached /api/view hide it
+            listingsCache.clear();
             res.json({ success: true, message: 'Listing Published Successfully', id: result.insertId });
         });
     });
 };
 
-// 9. ADD REVIEW (Supports Landlord Replies)
-// UPDATED: the reviewer is the logged-in user (from the token), the display
-// name comes from the DB (can't be faked), only the listing's own landlord can
-// post a reply, and a landlord's own listing never receives a star rating from them.
-// Requires `parent_review_id INT NULL` on the reviews table (see earlier migration).
+// 6. ADD REVIEW (Supports Landlord Replies)
+// The reviewer is the logged-in user (from the token), the display name comes
+// from the DB, only the listing's own landlord can post a reply, and a landlord's
+// own listing never receives a star rating from them.
 exports.addReview = (req, res) => {
     const { listing_id, comment, rating, is_reply, parent_review_id } = req.body;
     const user_id = req.userId;
@@ -433,7 +340,6 @@ exports.addReview = (req, res) => {
             return res.status(403).json({ success: false, message: 'Only the landlord of this listing can reply.' });
         }
 
-        // rating is 0 for a landlord reply or the landlord's own comment
         const cleanRating = Math.min(5, Math.max(0, parseInt(rating) || 0));
         const finalRating = (is_reply || isOwner) ? 0 : cleanRating;
         const finalReplyStatus = is_reply ? 1 : 0;
@@ -448,10 +354,9 @@ exports.addReview = (req, res) => {
     });
 };
 
-// 10. GET REVIEWS (Ordered by Date)
+// 7. GET REVIEWS (Ordered by Date)
 exports.getReviews = (req, res) => {
     const { listing_id } = req.params;
-    // We order by created_at so replies appear in sequence
     const sql = `SELECT * FROM reviews WHERE listing_id = ? ORDER BY created_at ASC`;
     
     db.query(sql, [listing_id], (err, rows) => {
@@ -460,41 +365,13 @@ exports.getReviews = (req, res) => {
     });
 };
 
-// 11. DELETE LISTING
-exports.deleteListing = (req, res) => {
-    const listingId = req.params.id;
-    const user_id = req.userId; // from the login token
-
-    const sql = "DELETE FROM listings WHERE id = ? AND user_id = ?";
-    
-    db.query(sql, [listingId, user_id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows > 0) {
-            listingsCache.clear(); // NEW: this listing no longer exists - don't let a cached /api/view keep showing it
-            res.json({ success: true, message: 'Listing deleted successfully' });
-        } else {
-            res.status(403).json({ success: false, message: 'Unauthorized or Listing not found' });
-        }
-    });
-};
-
-// 12. UPDATE LISTING
-// UPDATED: this is now THE live handler for POST /api/update-listing. It
-// used to be shadowed by an inline handler registered directly on `app` in
-// server.js (Express matches whichever handler was registered first, and
-// that one was registered before `app.use('/api', routes)` mounted this
-// controller) - that duplicate has been removed from server.js so there is
-// only one place to maintain this logic going forward.
-// This version is brought up to full parity with what the removed inline
-// handler did, which this controller's version previously did NOT do:
-//   - accepts thumbnail/images and writes them with COALESCE(?, column) so
-//     a save that didn't pick new photos leaves the existing ones untouched
-//     (home.js sends null for these when nothing new was selected)
-//   - guards against an oversized combined photo payload (>15MB), same
-//     threshold used in addListing() above and in the removed inline handler
+// 8. UPDATE LISTING (landlord edits their OWN listing)
+// Photos use COALESCE so a save that didn't pick new photos leaves the existing
+// ones untouched. A landlord can still edit a listing an admin hid; only an admin
+// can unhide it.
 exports.updateListing = (req, res) => {
     const { listingId, title, category, price, location, rooms, size, amenities, status, thumbnail, images } = req.body;
-    const user_id = req.userId; // from the login token
+    const user_id = req.userId;
     const finalStatus = (status === 'occupied') ? 'occupied' : 'available';
 
     if (images) {
@@ -516,7 +393,7 @@ exports.updateListing = (req, res) => {
     db.query(sql, [title, category, price, location, rooms, size, amenities, finalStatus, thumbnail, images, listingId, user_id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message, message: err.message });
         if (result.affectedRows > 0) {
-            listingsCache.clear(); // NEW: price/photos/status etc. just changed - don't serve a stale cached version
+            listingsCache.clear();
             res.json({ success: true, message: 'Listing updated successfully!' });
         } else {
             res.status(403).json({ success: false, message: 'Unauthorized or listing not found' });
@@ -524,13 +401,10 @@ exports.updateListing = (req, res) => {
     });
 };
 
-// 13. TOGGLE BOOKMARK
-// UPDATED: this is now THE live handler for POST /api/toggle-bookmark - the
-// inline duplicate registered directly on `app` in server.js has been
-// removed (same shadowing issue described on updateListing() above).
+// 9. TOGGLE BOOKMARK
 exports.toggleBookmark = (req, res) => {
     const { listingId, action } = req.body;
-    const userId = req.userId; // from the login token
+    const userId = req.userId;
 
     if (action === 'add') {
         const sql = "INSERT IGNORE INTO bookmarks (user_id, listing_id) VALUES (?, ?)";
@@ -547,9 +421,7 @@ exports.toggleBookmark = (req, res) => {
     }
 };
 
-// 14. GET BOOKMARKS
-// UPDATED: this is now THE live handler for GET /api/get-bookmarks/:id -
-// same shadowing issue as toggleBookmark() above, now resolved.
+// 10. GET BOOKMARKS
 exports.getBookmarks = (req, res) => {
     const userId = req.params.id;
     if (String(userId) !== String(req.userId)) return res.status(403).json({ message: 'Forbidden' });
@@ -560,19 +432,11 @@ exports.getBookmarks = (req, res) => {
     });
 };
 
-// 15. SMART SEARCH (Taglish-aware, with Role Security)
-// UPDATED: this is now THE live handler for POST /api/smart-search, for the
-// same reason described on updateListing() above - the inline duplicate in
-// server.js that used to shadow this has been removed. Shares its parsing/
-// scoring logic with the old inline version via utils/smartSearchLogic.js
-// (they were kept in sync even while this one was dead code), and also
-// carries the avg_rating/review_count subqueries so Smart Search cards get
-// the same star-average pill as the normal Browse view.
-// NEW (verified badge): also selects u.landlord_status so Smart Search
-// result cards can show the Verified badge too.
+// 11. SMART SEARCH (Taglish-aware, with Role Security)
+// NEW (Module 7): hidden listings and listings of suspended landlords are left
+// out; a landlord still finds their own hidden ones (is_hidden is on the row).
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
-    // Access user info from the request (sent from frontend)
     const { role, id: userId } = req.body.userContext || {}; 
 
     const sql = `
@@ -582,9 +446,10 @@ exports.smartSearch = (req, res) => {
             (SELECT COUNT(*) FROM reviews r WHERE r.listing_id = l.id) AS review_count
         FROM listings l 
         LEFT JOIN users u ON l.user_id = u.id
+        WHERE COALESCE(u.is_suspended, 0) = 0 AND (l.is_hidden = 0 OR l.user_id = ?)
     `;
 
-    db.query(sql, (err, rows) => {
+    db.query(sql, [req.userId || 0], (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
 
         const finalResults = runSmartSearch(userQuery, rows, role, userId);
@@ -594,10 +459,9 @@ exports.smartSearch = (req, res) => {
 };
 
 // ============================================================================
-// 16. MESSAGING SYSTEM (NEW) — tenant <-> landlord direct messages
+// 12. MESSAGING SYSTEM - tenant <-> landlord direct messages
 // ============================================================================
-// Requires two new tables. Run once on your MySQL database (same pattern as
-// the earlier LONGTEXT/parent_review_id migrations):
+// Requires two tables:
 //
 //   CREATE TABLE conversations (
 //     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -617,15 +481,10 @@ exports.smartSearch = (req, res) => {
 //     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 //     is_read TINYINT(1) DEFAULT 0
 //   );
-//
-// A "conversation" is uniquely identified by (listing_id, tenant_id,
-// landlord_id) - the UNIQUE KEY means the same tenant messaging the same
-// landlord about the same listing always lands in the same thread, even if
-// they click "Message Landlord" from that listing more than once.
 
-// 16a. START (OR RESUME) A CONVERSATION
-// UPDATED: the tenant is the logged-in user (token) and the landlord is looked
-// up from the listing itself, so ids sent in the body are ignored.
+// 12a. START (OR RESUME) A CONVERSATION
+// The tenant is the logged-in user (token) and the landlord is looked up from
+// the listing itself, so ids sent in the body are ignored.
 exports.startConversation = (req, res) => {
     const { listing_id } = req.body;
     const tenant_id = req.userId;
@@ -667,8 +526,7 @@ exports.startConversation = (req, res) => {
     });
 };
 
-// 16b. LIST A USER'S CONVERSATIONS (their Messages inbox)
-// UPDATED: you can only list your own conversations.
+// 12b. LIST A USER'S CONVERSATIONS (their Messages inbox) - you can only list your own.
 exports.getConversations = (req, res) => {
     const userId = req.params.userId;
     if (String(userId) !== String(req.userId)) return res.status(403).json({ message: 'Forbidden' });
@@ -706,9 +564,9 @@ function checkConversationMember(conversationId, userId, callback) {
     });
 }
 
-// 16c. GET MESSAGES IN A CONVERSATION
-// UPDATED: only the two people in the conversation can read it, and "mark as
-// read" applies to the logged-in user (the ?user_id= query param is ignored).
+// 12c. GET MESSAGES IN A CONVERSATION
+// Only the two people in the conversation can read it, and "mark as read"
+// applies to the logged-in user.
 exports.getMessages = (req, res) => {
     const conversationId = req.params.conversationId;
     const viewerId = req.userId;
@@ -729,8 +587,7 @@ exports.getMessages = (req, res) => {
     });
 };
 
-// 16d. SEND A MESSAGE
-// UPDATED: the sender is the logged-in user, and they must be part of the conversation.
+// 12d. SEND A MESSAGE - the sender is the logged-in user, and must be part of the conversation.
 exports.sendMessage = (req, res) => {
     const { conversation_id, message } = req.body;
     const sender_id = req.userId;
@@ -761,24 +618,11 @@ exports.sendMessage = (req, res) => {
 };
 
 // ============================================================================
+// 13. DELETE LISTING (landlord deletes their OWN listing)
 // ============================================================================
-//  FIX: deleting a listing that has reviews, bookmarks or chats.
-//  Everything ABOVE this line is your original code, unchanged.
-//  A later `exports.x = ...` replaces an earlier one, so this takes over
-//  from the original deleteListing (section 11).
-// ============================================================================
-// ============================================================================
-
-// 11. DELETE LISTING (fixed)
-// The original deleted only the listing row, so a landlord could not delete a
-// listing that already had reviews, bookmarks or chats (the database blocks
-// it). This version removes those rows first, in one transaction, and still
-// only lets the landlord who OWNS the listing do it.
 // Deletes a listing AND everything that points at it (reviews, bookmarks, chat
-// conversations + their messages), all-or-nothing in ONE transaction.
-//   ownerId = null -> admin delete (any listing)
-//   ownerId = 12   -> landlord delete (only if user 12 owns the listing)
-//   done(err, affectedRows)   affectedRows is 0 if not found / not yours
+// conversations + their messages), all-or-nothing in ONE transaction, and only
+// if this landlord owns it. (Admins can no longer delete listings - Module 7.)
 function deleteListingWithDependents(listingId, ownerId, done) {
     db.getConnection((connErr, conn) => {
         if (connErr) return done(connErr);
@@ -788,12 +632,7 @@ function deleteListingWithDependents(listingId, ownerId, done) {
         conn.beginTransaction((txErr) => {
             if (txErr) { conn.release(); return done(txErr); }
 
-            const checkSql = ownerId === null
-                ? 'SELECT id FROM listings WHERE id = ?'
-                : 'SELECT id FROM listings WHERE id = ? AND user_id = ?';
-            const checkParams = ownerId === null ? [listingId] : [listingId, ownerId];
-
-            conn.query(checkSql, checkParams, (checkErr, rows) => {
+            conn.query('SELECT id FROM listings WHERE id = ? AND user_id = ?', [listingId, ownerId], (checkErr, rows) => {
                 if (checkErr) return fail(checkErr);
                 if (rows.length === 0) {
                     // Not found, or not this landlord's listing: change nothing.
@@ -842,7 +681,7 @@ exports.deleteListing = (req, res) => {
         if (!affectedRows) {
             return res.status(403).json({ success: false, message: 'Unauthorized or Listing not found' });
         }
-        listingsCache.clear(); // this listing no longer exists - don't let a cached /api/view keep showing it
+        listingsCache.clear();
         res.json({ success: true, message: 'Listing deleted successfully' });
     });
 };
