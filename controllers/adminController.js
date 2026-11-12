@@ -1,20 +1,19 @@
 const db = require('../config/db');
 const bcrypt = require('bcryptjs');
-const { signAdminToken, requireAdmin } = require('../middleware/auth');
+const { signAdminToken, requireAdmin, markSuspended, markActive } = require('../middleware/auth');
+// Same in-memory /api/view cache used by userController.js - anything an admin
+// does that changes what the public sees must clear it.
+const listingsCache = require('../utils/listingsCache');
 
 const BCRYPT_ROUNDS = 10;
 const isBcryptHash = (str) => typeof str === 'string' && /^\$2[aby]\$\d{2}\$/.test(str);
-// Same in-memory /api/view cache used by userController.js - admin
-// edits/deletes bypass userController.js entirely, so without clearing it
-// here too, an admin fixing a listing's price (for example) wouldn't show
-// up on the public Browse view until the cache's TTL expired on its own.
-const listingsCache = require('../utils/listingsCache');
 
-// --- ADMIN LOGIN ---
-// Checks the `admins` DB table. Passwords are bcrypt-hashed. Any admin still
-// on a plain-text password is accepted once and upgraded to a hash right then.
-// ADMIN_KEY is still the shared secret returned on success (replaced by a
-// signed, expiring token in the next security step).
+// ============================================================================
+//  LOGIN / IDENTITY
+// ============================================================================
+
+// Checks the `admins` DB table. Passwords are bcrypt-hashed. Any admin still on
+// a plain-text password is accepted once and upgraded to a hash right then.
 exports.adminLogin = (req, res) => {
     const email = (req.body.email || '').toString().trim();
     const password = (req.body.password || '').toString();
@@ -45,9 +44,8 @@ exports.adminLogin = (req, res) => {
 
         if (!ok) return invalid();
 
-        // The "adminKey" the panel stores and sends back in the x-admin-key header
-        // is now a SIGNED token that expires after 2 hours (no more shared,
-        // never-expiring ADMIN_KEY). admin.js needs no changes.
+        // The "adminKey" the panel sends back in the x-admin-key header is a SIGNED
+        // token that expires after 2 hours.
         let adminToken;
         try {
             adminToken = signAdminToken(admin);
@@ -63,12 +61,24 @@ exports.adminLogin = (req, res) => {
     });
 };
 
-// --- MIDDLEWARE: guards every route below it ---
-// Verifies the signed admin token from the x-admin-key header (see
-// middleware/auth.js). Same exported name as before, so adminRoutes.js is unchanged.
+// Guards every route below it in adminRoutes.js.
 exports.verifyAdminKey = requireAdmin;
 
-// --- DASHBOARD STATS ---
+// Name and email of the admin the token belongs to, read from the database.
+// If that admin account no longer exists, answer 401 so the panel signs out.
+exports.getMe = (req, res) => {
+    db.query('SELECT id, full_name, email FROM admins WHERE id = ? LIMIT 1', [req.adminId], (err, rows) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (rows.length === 0) {
+            return res.status(401).json({ success: false, message: 'Unauthorized: this admin account no longer exists.' });
+        }
+        res.json({ success: true, admin: rows[0] });
+    });
+};
+
+// ============================================================================
+//  DASHBOARD
+// ============================================================================
 exports.getStats = (req, res) => {
     const sql = `
         SELECT
@@ -84,30 +94,139 @@ exports.getStats = (req, res) => {
     });
 };
 
-// --- USERS: LIST (with optional search) ---
+exports.getOverview = async (req, res) => {
+    const q = (sql) => new Promise((resolve, reject) => {
+        db.query(sql, (err, rows) => (err ? reject(err) : resolve(rows)));
+    });
+
+    try {
+        const [byCategory, byStatus, byLandlordStatus, perMonth] = await Promise.all([
+            q(`SELECT category, COUNT(*) AS n FROM listings GROUP BY category ORDER BY n DESC`),
+            q(`SELECT COALESCE(status,'available') AS status, COUNT(*) AS n
+               FROM listings GROUP BY COALESCE(status,'available')`),
+            q(`SELECT COALESCE(landlord_status,'none') AS status, COUNT(*) AS n
+               FROM users GROUP BY COALESCE(landlord_status,'none')`),
+            q(`SELECT DATE_FORMAT(created_at,'%Y-%m') AS ym, COUNT(*) AS n
+               FROM listings
+               WHERE created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 5 MONTH), '%Y-%m-01')
+               GROUP BY DATE_FORMAT(created_at,'%Y-%m')
+               ORDER BY ym`)
+        ]);
+        res.json({ byCategory, byStatus, byLandlordStatus, perMonth });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+};
+
+// ============================================================================
+//  USERS  (view, edit, approve/reject landlords, suspend / unsuspend)
+//  Admins can NOT delete users any more (Module 7): deleting one also wiped all
+//  of that landlord's listings. Suspending is reversible and keeps the data.
+// ============================================================================
 exports.getAllUsersAdmin = (req, res) => {
     const search = req.query.search ? `%${req.query.search}%` : '%';
-    const sql = `SELECT id, full_name, email, role, landlord_status, address, contact FROM users WHERE full_name LIKE ? OR email LIKE ? ORDER BY id DESC`;
+    const sql = `SELECT id, full_name, email, role, landlord_status, address, contact, is_suspended, suspended_reason
+                 FROM users WHERE full_name LIKE ? OR email LIKE ? ORDER BY id DESC`;
     db.query(sql, [search, search], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 };
 
-// --- USERS: PENDING LANDLORD REQUESTS ---
-// Also selects landlord_doc_name - the name the applicant typed as "printed
-// on their Proof of Ownership document". admin.js uses this alongside the
-// user's registered full_name to render a Match / Mismatch / No name given
-// badge in the Landlord Requests table.
+const VALID_ROLES = ['tenant', 'landlord', 'pending'];
+const VALID_LANDLORD_STATUSES = ['none', 'pending', 'approved', 'rejected'];
+
+// Bad values are rejected BEFORE anything reaches the database.
+exports.updateUserAdmin = (req, res) => {
+    const { id } = req.params;
+    const { full_name, email, role, address, contact, landlord_status } = req.body || {};
+
+    if (!full_name || !String(full_name).trim()) {
+        return res.status(400).json({ success: false, message: 'Full name is required.' });
+    }
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
+        return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
+    }
+    if (!VALID_ROLES.includes(role)) {
+        return res.status(400).json({ success: false, message: 'Invalid role.' });
+    }
+    if (!VALID_LANDLORD_STATUSES.includes(landlord_status)) {
+        return res.status(400).json({ success: false, message: 'Invalid landlord status.' });
+    }
+
+    const sql = `UPDATE users SET full_name=?, email=?, role=?, address=?, contact=?, landlord_status=? WHERE id=?`;
+    db.query(sql, [full_name, email, role, address, contact, landlord_status, id], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        listingsCache.clear(); // landlord name/status shown on cached listings may have changed
+        res.json({ success: true, message: 'User updated successfully' });
+    });
+};
+
+// Moderation reasons: required, no angle brackets, max 500 characters.
+function cleanReason(raw) {
+    return String(raw || '').replace(/[<>]/g, '').trim().slice(0, 500);
+}
+
+// POST /api/admin/users/:id/suspend   { reason }
+exports.suspendUser = (req, res) => {
+    const { id } = req.params;
+    const reason = cleanReason(req.body && req.body.reason);
+    if (reason.length < 3) {
+        return res.status(400).json({ success: false, message: 'Please give a reason for the suspension.' });
+    }
+
+    const sql = `UPDATE users SET is_suspended = 1, suspended_reason = ?, suspended_at = NOW() WHERE id = ?`;
+    db.query(sql, [reason, id], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        markSuspended(id);     // takes effect on their very next request
+        listingsCache.clear(); // their listings leave the public feed
+        res.json({ success: true, message: 'User suspended' });
+    });
+};
+
+// POST /api/admin/users/:id/unsuspend
+exports.unsuspendUser = (req, res) => {
+    const { id } = req.params;
+    const sql = `UPDATE users SET is_suspended = 0, suspended_reason = NULL, suspended_at = NULL WHERE id = ?`;
+    db.query(sql, [id], (err, result) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
+        markActive(id);
+        listingsCache.clear();
+        res.json({ success: true, message: 'User unsuspended' });
+    });
+};
+
+// ============================================================================
+//  LANDLORD APPROVAL WORKFLOW
+// ============================================================================
+// Light list: NO huge base64 documents. They are fetched one applicant at a
+// time by getLandlordRequestDocs, only when an admin clicks "View Docs".
 exports.getLandlordRequests = (req, res) => {
-    const sql = `SELECT id, full_name, email, contact, address, landlord_documents, landlord_doc_name FROM users WHERE landlord_status = 'pending' ORDER BY id DESC`;
+    const sql = `
+        SELECT id, full_name, email, contact, address, landlord_doc_name,
+               (landlord_documents IS NOT NULL AND landlord_documents <> '') AS has_documents
+        FROM users
+        WHERE landlord_status = 'pending'
+        ORDER BY id DESC
+    `;
     db.query(sql, (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 };
 
-// --- USERS: APPROVE LANDLORD REQUEST ---
+exports.getLandlordRequestDocs = (req, res) => {
+    const { id } = req.params;
+    db.query('SELECT landlord_documents FROM users WHERE id = ?', [id], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
+        res.json({ documents: rows[0].landlord_documents || '' });
+    });
+};
+
 // This is the ONLY place a user's role actually becomes 'landlord'.
 exports.approveLandlord = (req, res) => {
     const { id } = req.params;
@@ -115,14 +234,12 @@ exports.approveLandlord = (req, res) => {
     db.query(sql, [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-        listingsCache.clear(); // NEW: landlord_status (Verified badge) is shown on cached listings
+        listingsCache.clear(); // landlord_status (Verified badge) is shown on cached listings
         res.json({ success: true, message: 'Landlord request approved' });
     });
 };
 
-// --- USERS: REJECT LANDLORD REQUEST ---
-// Accepts whatever string is passed as `reason` in the request body.
-// admin.js builds that string from a template picker (or custom text).
+// Accepts whatever string admin.js sends as `reason` (template picker or custom text).
 exports.rejectLandlord = (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
@@ -132,41 +249,27 @@ exports.rejectLandlord = (req, res) => {
     db.query(sql, [finalReason, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-        listingsCache.clear(); // NEW
+        listingsCache.clear();
         res.json({ success: true, message: 'Landlord request rejected' });
     });
 };
 
-// --- USERS: FULL ADMIN EDIT (CRUD - Update) ---
-exports.updateUserAdmin = (req, res) => {
-    const { id } = req.params;
-    const { full_name, email, role, address, contact, landlord_status } = req.body;
-
-    const sql = `UPDATE users SET full_name=?, email=?, role=?, address=?, contact=?, landlord_status=? WHERE id=?`;
-    db.query(sql, [full_name, email, role, address, contact, landlord_status, id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-        listingsCache.clear(); // NEW: landlord name/status shown on cached listings may have changed
-        res.json({ success: true, message: 'User updated successfully' });
-    });
-};
-
-// --- USERS: DELETE (CRUD - Delete) ---
-exports.deleteUserAdmin = (req, res) => {
-    const { id } = req.params;
-    db.query('DELETE FROM users WHERE id = ?', [id], (err, result) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (result.affectedRows === 0) return res.status(404).json({ message: 'User not found' });
-        listingsCache.clear(); // NEW: this user's listings may no longer appear in /api/view
-        res.json({ success: true, message: 'User deleted successfully' });
-    });
-};
-
-// --- LISTINGS: LIST ALL (admin sees everyone's listings) ---
+// ============================================================================
+//  LISTINGS  (view, hide / unhide)
+//  Admins can NOT delete or edit listings any more (Module 7). They moderate:
+//  a hidden listing disappears from the public feed, the landlord still sees it
+//  together with the reason, and an admin can unhide it at any time.
+// ============================================================================
+// Light list: only the columns the panel needs (no photo blobs). `thumbnail` is
+// only sent when it's a short URL, so old base64 thumbnails never bloat it.
 exports.getAllListingsAdmin = (req, res) => {
     const search = req.query.search ? `%${req.query.search}%` : '%';
     const sql = `
-        SELECT l.*, u.full_name AS landlord_name, u.email AS landlord_email
+        SELECT l.id, l.user_id, l.title, l.category, l.price, l.location, l.rooms, l.size,
+               l.amenities, l.status, l.created_at,
+               l.is_hidden, l.hidden_reason, l.hidden_at,
+               CASE WHEN LENGTH(l.thumbnail) < 1000 THEN l.thumbnail ELSE NULL END AS thumbnail,
+               u.full_name AS landlord_name, u.email AS landlord_email
         FROM listings l
         JOIN users u ON l.user_id = u.id
         WHERE l.title LIKE ? OR l.location LIKE ?
@@ -178,31 +281,38 @@ exports.getAllListingsAdmin = (req, res) => {
     });
 };
 
-// --- LISTINGS: UPDATE (no ownership check needed, admin overrides) ---
-exports.updateListingAdmin = (req, res) => {
+// POST /api/admin/listings/:id/hide   { reason }
+exports.hideListing = (req, res) => {
     const { id } = req.params;
-    const { title, category, price, location, rooms, size, amenities } = req.body;
-    const sql = `UPDATE listings SET title=?, category=?, price=?, location=?, rooms=?, size=?, amenities=? WHERE id=?`;
-    db.query(sql, [title, category, price, location, rooms, size, amenities, id], (err, result) => {
+    const reason = cleanReason(req.body && req.body.reason);
+    if (reason.length < 3) {
+        return res.status(400).json({ success: false, message: 'Please give a reason for hiding this listing.' });
+    }
+
+    const sql = `UPDATE listings SET is_hidden = 1, hidden_reason = ?, hidden_at = NOW(), hidden_by = ? WHERE id = ?`;
+    db.query(sql, [reason, req.adminId, id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
-        listingsCache.clear(); // keep the public Browse view in sync with this admin edit
-        res.json({ success: true, message: 'Listing updated successfully' });
+        listingsCache.clear();
+        res.json({ success: true, message: 'Listing hidden' });
     });
 };
 
-// --- LISTINGS: DELETE (admin override, ignores ownership) ---
-exports.deleteListingAdmin = (req, res) => {
+// POST /api/admin/listings/:id/unhide
+exports.unhideListing = (req, res) => {
     const { id } = req.params;
-    db.query('DELETE FROM listings WHERE id = ?', [id], (err, result) => {
+    const sql = `UPDATE listings SET is_hidden = 0, hidden_reason = NULL, hidden_at = NULL, hidden_by = NULL WHERE id = ?`;
+    db.query(sql, [id], (err, result) => {
         if (err) return res.status(500).json({ error: err.message });
         if (result.affectedRows === 0) return res.status(404).json({ message: 'Listing not found' });
-        listingsCache.clear(); // don't let a cached /api/view keep showing a listing an admin just removed
-        res.json({ success: true, message: 'Listing deleted successfully' });
+        listingsCache.clear();
+        res.json({ success: true, message: 'Listing is visible again' });
     });
 };
 
-// --- REVIEWS: LIST ALL ---
+// ============================================================================
+//  REVIEWS (moderation)
+// ============================================================================
 exports.getAllReviewsAdmin = (req, res) => {
     const sql = `SELECT r.*, l.title AS listing_title FROM reviews r LEFT JOIN listings l ON r.listing_id = l.id ORDER BY r.created_at DESC`;
     db.query(sql, (err, rows) => {
@@ -211,7 +321,6 @@ exports.getAllReviewsAdmin = (req, res) => {
     });
 };
 
-// --- REVIEWS: DELETE (moderation) ---
 exports.deleteReviewAdmin = (req, res) => {
     const { id } = req.params;
     db.query('DELETE FROM reviews WHERE id = ?', [id], (err, result) => {
@@ -222,11 +331,10 @@ exports.deleteReviewAdmin = (req, res) => {
     });
 };
 
-// --- ADMIN ACCOUNT MANAGEMENT (CRUD for admin accounts themselves) ---
-// Powers the "Settings" panel in admin.html, letting a logged-in admin
-// create/edit/delete OTHER admin accounts.
-
-// LIST all admins (id, name, email, created_at only - never sends passwords)
+// ============================================================================
+//  ADMIN ACCOUNT MANAGEMENT (the "Settings" panel)
+// ============================================================================
+// Never sends passwords.
 exports.getAllAdmins = (req, res) => {
     const sql = `SELECT id, full_name, email, created_at FROM admins ORDER BY id ASC`;
     db.query(sql, (err, rows) => {
@@ -235,7 +343,6 @@ exports.getAllAdmins = (req, res) => {
     });
 };
 
-// CREATE a new admin account (password is stored as a bcrypt hash)
 exports.createAdmin = async (req, res) => {
     const { full_name, email, password } = req.body;
 
@@ -251,7 +358,6 @@ exports.createAdmin = async (req, res) => {
         const sql = `INSERT INTO admins (full_name, email, password) VALUES (?, ?, ?)`;
         db.query(sql, [full_name, email, hash], (err, result) => {
             if (err) {
-                // MySQL duplicate-key error code, thrown by the UNIQUE constraint on email
                 if (err.code === 'ER_DUP_ENTRY') {
                     return res.status(409).json({ success: false, message: 'An admin with that email already exists.' });
                 }
@@ -264,8 +370,7 @@ exports.createAdmin = async (req, res) => {
     }
 };
 
-// UPDATE an existing admin account. Password is optional on edit - leaving
-// it blank on the frontend keeps the existing password unchanged.
+// Password is optional on edit - leaving it blank keeps the existing password.
 exports.updateAdmin = async (req, res) => {
     const { id } = req.params;
     const { full_name, email, password } = req.body;
@@ -302,10 +407,14 @@ exports.updateAdmin = async (req, res) => {
     }
 };
 
-// DELETE an admin account. Guard: never allow deleting the last remaining
-// admin, or the panel becomes permanently inaccessible to everyone.
+// Guards: an admin can't delete their OWN account, and the last remaining admin
+// can never be deleted (or the panel becomes permanently inaccessible).
 exports.deleteAdmin = (req, res) => {
     const { id } = req.params;
+
+    if (String(id) === String(req.adminId)) {
+        return res.status(400).json({ success: false, message: "You can't delete your own admin account while logged in." });
+    }
 
     db.query('SELECT COUNT(*) AS total FROM admins', (err, countRows) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -322,94 +431,7 @@ exports.deleteAdmin = (req, res) => {
 };
 
 // ============================================================================
-// ============================================================================
-//  ADMIN PANEL UPGRADE - everything BELOW this line is NEW.
-//  Everything above this line is your original code, unchanged.
-//
-//  In Node, a later `exports.x = ...` replaces an earlier one, so the versions
-//  below take over from the originals without removing them.
-// ============================================================================
-// ============================================================================
-
-// --- LANDLORD REQUESTS (lighter list) ---------------------------------------
-// Replaces the original getLandlordRequests. It NO LONGER sends the huge
-// base64 landlord_documents for every pending applicant. The documents are
-// fetched one applicant at a time by getLandlordRequestDocs below, only when an
-// admin clicks "View Docs".
-exports.getLandlordRequests = (req, res) => {
-    const sql = `
-        SELECT id, full_name, email, contact, address, landlord_doc_name,
-               (landlord_documents IS NOT NULL AND landlord_documents <> '') AS has_documents
-        FROM users
-        WHERE landlord_status = 'pending'
-        ORDER BY id DESC
-    `;
-    db.query(sql, (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
-};
-
-// NEW: documents for ONE applicant (GET /api/admin/landlord-requests/:id/documents)
-exports.getLandlordRequestDocs = (req, res) => {
-    const { id } = req.params;
-    db.query('SELECT landlord_documents FROM users WHERE id = ?', [id], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        if (rows.length === 0) return res.status(404).json({ message: 'User not found' });
-        res.json({ documents: rows[0].landlord_documents || '' });
-    });
-};
-
-// --- LISTINGS (lighter list) ------------------------------------------------
-// Replaces the original getAllListingsAdmin. Picks only the columns the panel
-// needs (no photo blobs). `thumbnail` is only sent when it's a short URL, so
-// old base64 thumbnails never bloat the response.
-exports.getAllListingsAdmin = (req, res) => {
-    const search = req.query.search ? `%${req.query.search}%` : '%';
-    const sql = `
-        SELECT l.id, l.user_id, l.title, l.category, l.price, l.location, l.rooms, l.size,
-               l.amenities, l.status, l.created_at,
-               CASE WHEN LENGTH(l.thumbnail) < 1000 THEN l.thumbnail ELSE NULL END AS thumbnail,
-               u.full_name AS landlord_name, u.email AS landlord_email
-        FROM listings l
-        JOIN users u ON l.user_id = u.id
-        WHERE l.title LIKE ? OR l.location LIKE ?
-        ORDER BY l.created_at DESC
-    `;
-    db.query(sql, [search, search], (err, rows) => {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
-    });
-};
-
-// --- OVERVIEW CHARTS (GET /api/admin/overview) ------------------------------
-exports.getOverview = async (req, res) => {
-    const q = (sql) => new Promise((resolve, reject) => {
-        db.query(sql, (err, rows) => (err ? reject(err) : resolve(rows)));
-    });
-
-    try {
-        const [byCategory, byStatus, byLandlordStatus, perMonth] = await Promise.all([
-            q(`SELECT category, COUNT(*) AS n FROM listings GROUP BY category ORDER BY n DESC`),
-            q(`SELECT COALESCE(status,'available') AS status, COUNT(*) AS n
-               FROM listings GROUP BY COALESCE(status,'available')`),
-            q(`SELECT COALESCE(landlord_status,'none') AS status, COUNT(*) AS n
-               FROM users GROUP BY COALESCE(landlord_status,'none')`),
-            q(`SELECT DATE_FORMAT(created_at,'%Y-%m') AS ym, COUNT(*) AS n
-               FROM listings
-               WHERE created_at >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 5 MONTH), '%Y-%m-01')
-               GROUP BY DATE_FORMAT(created_at,'%Y-%m')
-               ORDER BY ym`)
-        ]);
-        res.json({ byCategory, byStatus, byLandlordStatus, perMonth });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-};
-
-// ============================================================================
-//  MODULE 6 - ACTIVITY LOG with filters and "load more"
-//  (GET /api/admin/audit-log)
+//  ACTIVITY LOG with filters and "load more"  (GET /api/admin/audit-log)
 // ============================================================================
 // Query string (all optional):
 //   limit      rows per page (default 25, max 100)
@@ -423,18 +445,23 @@ exports.getOverview = async (req, res) => {
 //
 // The log stores the HTTP method and path of every successful change, so the
 // "action type" is worked out from those. These SQL pieces are fixed text and
-// never contain user input.
+// never contain user input. (The *_delete listing/user keys stay so history from
+// before Module 7 can still be filtered.)
 const AUDIT_ACTIONS = {
-    approve:        "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/approve')",
-    reject:         "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/reject')",
-    user_edit:      "(a.method = 'PUT'    AND a.path LIKE '%/users/%')",
-    user_delete:    "(a.method = 'DELETE' AND a.path LIKE '%/users/%')",
-    listing_edit:   "(a.method = 'PUT'    AND a.path LIKE '%/listings/%')",
-    listing_delete: "(a.method = 'DELETE' AND a.path LIKE '%/listings/%')",
-    review_delete:  "(a.method = 'DELETE' AND a.path LIKE '%/reviews/%')",
-    admin_create:   "(a.method = 'POST'   AND a.path LIKE '%/admins')",
-    admin_edit:     "(a.method = 'PUT'    AND a.path LIKE '%/admins/%')",
-    admin_delete:   "(a.method = 'DELETE' AND a.path LIKE '%/admins/%')"
+    approve:         "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/approve')",
+    reject:          "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/reject')",
+    user_edit:       "(a.method = 'PUT'    AND a.path LIKE '%/users/%')",
+    user_suspend:    "(a.method = 'POST'   AND a.path LIKE '%/users/%/suspend')",
+    user_unsuspend:  "(a.method = 'POST'   AND a.path LIKE '%/users/%/unsuspend')",
+    user_delete:     "(a.method = 'DELETE' AND a.path LIKE '%/users/%')",
+    listing_hide:    "(a.method = 'POST'   AND a.path LIKE '%/listings/%/hide')",
+    listing_unhide:  "(a.method = 'POST'   AND a.path LIKE '%/listings/%/unhide')",
+    listing_edit:    "(a.method = 'PUT'    AND a.path LIKE '%/listings/%')",
+    listing_delete:  "(a.method = 'DELETE' AND a.path LIKE '%/listings/%')",
+    review_delete:   "(a.method = 'DELETE' AND a.path LIKE '%/reviews/%')",
+    admin_create:    "(a.method = 'POST'   AND a.path LIKE '%/admins')",
+    admin_edit:      "(a.method = 'PUT'    AND a.path LIKE '%/admins/%')",
+    admin_delete:    "(a.method = 'DELETE' AND a.path LIKE '%/admins/%')"
 };
 
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -492,135 +519,5 @@ exports.getAuditLog = (req, res) => {
     db.query(sql, [...params, limit + 1], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json({ rows: rows.slice(0, limit), hasMore: rows.length > limit });
-    });
-};
-
-// --- VALIDATION: editing a user ---------------------------------------------
-// Wraps the original updateUserAdmin: bad values are rejected BEFORE the
-// original code runs, so nothing invalid reaches the database.
-const _originalUpdateUserAdmin = exports.updateUserAdmin;
-const VALID_ROLES = ['tenant', 'landlord', 'pending'];
-const VALID_LANDLORD_STATUSES = ['none', 'pending', 'approved', 'rejected'];
-
-exports.updateUserAdmin = (req, res) => {
-    const { full_name, email, role, landlord_status } = req.body || {};
-
-    if (!full_name || !String(full_name).trim()) {
-        return res.status(400).json({ success: false, message: 'Full name is required.' });
-    }
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim())) {
-        return res.status(400).json({ success: false, message: 'Please enter a valid email address.' });
-    }
-    if (!VALID_ROLES.includes(role)) {
-        return res.status(400).json({ success: false, message: 'Invalid role.' });
-    }
-    if (!VALID_LANDLORD_STATUSES.includes(landlord_status)) {
-        return res.status(400).json({ success: false, message: 'Invalid landlord status.' });
-    }
-
-    return _originalUpdateUserAdmin(req, res);
-};
-
-// --- GUARD: an admin can't delete their OWN account -------------------------
-// The panel already disables that button, but anyone calling the API directly
-// could skip it. Now the server refuses too.
-const _originalDeleteAdmin = exports.deleteAdmin;
-
-exports.deleteAdmin = (req, res) => {
-    if (String(req.params.id) === String(req.adminId)) {
-        return res.status(400).json({ success: false, message: "You can't delete your own admin account while logged in." });
-    }
-    return _originalDeleteAdmin(req, res);
-};
-
-// --- LISTINGS: DELETE (fixed) -----------------------------------------------
-// Replaces the original deleteListingAdmin. The original deleted only the
-// listing row, so any listing that already had reviews, bookmarks or chats was
-// blocked by the database ("foreign key constraint fails") and the panel just
-// said "Failed to delete listing". This version removes those dependent rows
-// first, all inside one transaction (see utils/deleteListingWithDependents.js).
-// Deletes a listing AND everything that points at it (reviews, bookmarks, chat
-// conversations + their messages), all-or-nothing in ONE transaction.
-//   ownerId = null -> admin delete (any listing)
-//   ownerId = 12   -> landlord delete (only if user 12 owns the listing)
-//   done(err, affectedRows)   affectedRows is 0 if not found / not yours
-function deleteListingWithDependents(listingId, ownerId, done) {
-    db.getConnection((connErr, conn) => {
-        if (connErr) return done(connErr);
-
-        const fail = (err) => conn.rollback(() => { conn.release(); done(err); });
-
-        conn.beginTransaction((txErr) => {
-            if (txErr) { conn.release(); return done(txErr); }
-
-            const checkSql = ownerId === null
-                ? 'SELECT id FROM listings WHERE id = ?'
-                : 'SELECT id FROM listings WHERE id = ? AND user_id = ?';
-            const checkParams = ownerId === null ? [listingId] : [listingId, ownerId];
-
-            conn.query(checkSql, checkParams, (checkErr, rows) => {
-                if (checkErr) return fail(checkErr);
-                if (rows.length === 0) {
-                    // Not found, or not this landlord's listing: change nothing.
-                    return conn.rollback(() => { conn.release(); done(null, 0); });
-                }
-
-                // Order matters: children first, the listing itself last.
-                const steps = [
-                    ['DELETE FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE listing_id = ?)', [listingId]],
-                    ['DELETE FROM conversations WHERE listing_id = ?', [listingId]],
-                    // Landlord replies point at the review they answer, so remove replies first.
-                    ['DELETE FROM reviews WHERE listing_id = ? AND parent_review_id IS NOT NULL', [listingId]],
-                    ['DELETE FROM reviews WHERE listing_id = ?', [listingId]],
-                    ['DELETE FROM bookmarks WHERE listing_id = ?', [listingId]],
-                    ['DELETE FROM listings WHERE id = ?', [listingId]]
-                ];
-
-                const run = (i) => {
-                    if (i >= steps.length) {
-                        return conn.commit((commitErr) => {
-                            if (commitErr) return fail(commitErr);
-                            conn.release();
-                            done(null, 1);
-                        });
-                    }
-                    conn.query(steps[i][0], steps[i][1], (stepErr) => {
-                        if (stepErr) return fail(stepErr);
-                        run(i + 1);
-                    });
-                };
-                run(0);
-            });
-        });
-    });
-}
-
-exports.deleteListingAdmin = (req, res) => {
-    deleteListingWithDependents(req.params.id, null, (err, affectedRows) => {
-        if (err) {
-            console.error('Admin delete listing failed:', err.message);
-            return res.status(500).json({ error: err.message });
-        }
-        if (!affectedRows) return res.status(404).json({ message: 'Listing not found' });
-        listingsCache.clear(); // don't let a cached /api/view keep showing a listing an admin just removed
-        res.json({ success: true, message: 'Listing deleted successfully' });
-    });
-};
-
-// ============================================================================
-//  MODULE 4 - who am I? (GET /api/admin/me)
-// ============================================================================
-// Returns the name and email of the admin the token belongs to, read from the
-// database (never from the request), so the top bar is always correct.
-// If the admin account was deleted while the token was still valid, this
-// answers 401 so the panel signs that person out instead of leaving a
-// "ghost" session open.
-exports.getMe = (req, res) => {
-    db.query('SELECT id, full_name, email FROM admins WHERE id = ? LIMIT 1', [req.adminId], (err, rows) => {
-        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
-        if (rows.length === 0) {
-            return res.status(401).json({ success: false, message: 'Unauthorized: this admin account no longer exists.' });
-        }
-        res.json({ success: true, admin: rows[0] });
     });
 };
