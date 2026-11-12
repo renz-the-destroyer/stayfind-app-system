@@ -46,7 +46,7 @@ exports.adminLogin = (req, res) => {
         if (!ok) return invalid();
 
         // The "adminKey" the panel stores and sends back in the x-admin-key header
-        // is now a SIGNED token that expires after 8 hours (no more shared,
+        // is now a SIGNED token that expires after 2 hours (no more shared,
         // never-expiring ADMIN_KEY). admin.js needs no changes.
         let adminToken;
         try {
@@ -407,19 +407,91 @@ exports.getOverview = async (req, res) => {
     }
 };
 
-// --- ACTIVITY LOG (GET /api/admin/audit-log?limit=100) ----------------------
+// ============================================================================
+//  MODULE 6 - ACTIVITY LOG with filters and "load more"
+//  (GET /api/admin/audit-log)
+// ============================================================================
+// Query string (all optional):
+//   limit      rows per page (default 25, max 100)
+//   admin_id   only this admin's actions
+//   action     one of the keys in AUDIT_ACTIONS below
+//   from, to   dates as YYYY-MM-DD (inclusive), in the ADMIN'S timezone
+//   tz         the admin's timezone offset in minutes (JS getTimezoneOffset())
+//   before     id of the last row already loaded; returns the next older rows
+//
+// Answers { rows: [...], hasMore: true|false }.
+//
+// The log stores the HTTP method and path of every successful change, so the
+// "action type" is worked out from those. These SQL pieces are fixed text and
+// never contain user input.
+const AUDIT_ACTIONS = {
+    approve:        "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/approve')",
+    reject:         "(a.method = 'POST'   AND a.path LIKE '%/landlord-requests/%/reject')",
+    user_edit:      "(a.method = 'PUT'    AND a.path LIKE '%/users/%')",
+    user_delete:    "(a.method = 'DELETE' AND a.path LIKE '%/users/%')",
+    listing_edit:   "(a.method = 'PUT'    AND a.path LIKE '%/listings/%')",
+    listing_delete: "(a.method = 'DELETE' AND a.path LIKE '%/listings/%')",
+    review_delete:  "(a.method = 'DELETE' AND a.path LIKE '%/reviews/%')",
+    admin_create:   "(a.method = 'POST'   AND a.path LIKE '%/admins')",
+    admin_edit:     "(a.method = 'PUT'    AND a.path LIKE '%/admins/%')",
+    admin_delete:   "(a.method = 'DELETE' AND a.path LIKE '%/admins/%')"
+};
+
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+// Midnight of `ymd` in the admin's timezone, as a real point in time.
+// (getTimezoneOffset is negative east of UTC: the Philippines is -480.)
+function localMidnight(ymd, tzOffsetMinutes, addDays) {
+    const d = new Date(ymd + 'T00:00:00.000Z');
+    if (isNaN(d)) return null;
+    d.setUTCDate(d.getUTCDate() + (addDays || 0));
+    return new Date(d.getTime() + tzOffsetMinutes * 60000);
+}
+
 exports.getAuditLog = (req, res) => {
-    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
+    const where = [];
+    const params = [];
+
+    const adminId = parseInt(req.query.admin_id);
+    if (adminId > 0) {
+        where.push('a.admin_id = ?');
+        params.push(adminId);
+    }
+
+    const action = String(req.query.action || '');
+    if (AUDIT_ACTIONS[action]) where.push(AUDIT_ACTIONS[action]);
+
+    const tz = Math.min(840, Math.max(-840, parseInt(req.query.tz) || 0));
+    const from = String(req.query.from || '');
+    const to = String(req.query.to || '');
+    if (DATE_ONLY.test(from)) {
+        const start = localMidnight(from, tz, 0);
+        if (start) { where.push('a.created_at >= ?'); params.push(start); }
+    }
+    if (DATE_ONLY.test(to)) {
+        const endExclusive = localMidnight(to, tz, 1); // the whole "to" day counts
+        if (endExclusive) { where.push('a.created_at < ?'); params.push(endExclusive); }
+    }
+
+    const before = parseInt(req.query.before);
+    if (before > 0) {
+        where.push('a.id < ?');
+        params.push(before);
+    }
+
     const sql = `
-        SELECT a.id, a.method, a.path, a.created_at, ad.full_name AS admin_name
+        SELECT a.id, a.admin_id, a.method, a.path, a.created_at, ad.full_name AS admin_name
         FROM admin_audit_log a
         LEFT JOIN admins ad ON ad.id = a.admin_id
+        ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
         ORDER BY a.id DESC
         LIMIT ?
     `;
-    db.query(sql, [limit], (err, rows) => {
+    // One extra row tells us whether another page exists.
+    db.query(sql, [...params, limit + 1], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
-        res.json(rows);
+        res.json({ rows: rows.slice(0, limit), hasMore: rows.length > limit });
     });
 };
 
