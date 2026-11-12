@@ -12,11 +12,24 @@
 //   node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 
 const jwt = require('jsonwebtoken');
+const db = require('../config/db');
 
 const USER_TOKEN_TTL = '7d';
-// UPDATED (Module 5): was '8h'. A shorter admin session limits the damage if a
-// token is ever stolen or an admin walks away from a signed-in computer.
 const ADMIN_TOKEN_TTL = '2h';
+
+// NEW (Module 7): ids of suspended users, kept in memory so a suspension takes
+// effect on the very next request without a database query per request.
+// Loaded once at startup, then updated by markSuspended / markActive.
+const suspendedIds = new Set();
+db.query('SELECT id FROM users WHERE is_suspended = 1', (err, rows) => {
+    if (err) {
+        console.error('Could not load suspended users (did you run the Module 7 SQL?):', err.message);
+        return;
+    }
+    rows.forEach(r => suspendedIds.add(Number(r.id)));
+});
+exports.markSuspended = (id) => suspendedIds.add(Number(id));
+exports.markActive = (id) => suspendedIds.delete(Number(id));
 
 function getSecret() {
     const secret = process.env.JWT_SECRET;
@@ -34,27 +47,31 @@ exports.signAdminToken = (admin) =>
     jwt.sign({ sub: String(admin.id), typ: 'admin' }, getSecret(), { expiresIn: ADMIN_TOKEN_TTL });
 
 // Protects a route: only a logged-in user gets through, and req.userId is set
-// from the SIGNED token - never from the request body, so nobody can act as
-// somebody else by changing a user_id/email field.
+// from the SIGNED token - never from the request body.
 exports.requireUser = (req, res, next) => {
     const header = req.headers['authorization'] || '';
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
     if (!token) return res.status(401).json({ success: false, message: 'Please log in.' });
 
+    let payload;
     try {
-        const payload = jwt.verify(token, getSecret());
+        payload = jwt.verify(token, getSecret());
         if (payload.typ !== 'user') throw new Error('wrong token type');
-        req.userId = Number(payload.sub);
-        next();
     } catch (err) {
         return res.status(401).json({ success: false, message: 'Your session has expired. Please log in again.' });
     }
+
+    const id = Number(payload.sub);
+    // NEW (Module 7): a suspended user is signed out on their next request.
+    if (suspendedIds.has(id)) {
+        return res.status(401).json({ success: false, message: 'Your account has been suspended.' });
+    }
+    req.userId = id;
+    next();
 };
 
-// NEW (guest mode): for PUBLIC routes that show a bit more to logged-in people.
-// A valid token sets req.userId, exactly like requireUser. No token, or a bad
-// or expired one, simply means "guest": req.userId stays undefined and the
-// request continues. It never answers 401.
+// For PUBLIC routes that show a bit more to logged-in people. No token, a bad or
+// expired one, or a suspended user simply means "guest". It never answers 401.
 exports.optionalUser = (req, res, next) => {
     const header = req.headers['authorization'] || '';
     const token = header.startsWith('Bearer ') ? header.slice(7).trim() : null;
@@ -62,7 +79,8 @@ exports.optionalUser = (req, res, next) => {
     if (token) {
         try {
             const payload = jwt.verify(token, getSecret());
-            if (payload.typ === 'user') req.userId = Number(payload.sub);
+            const id = Number(payload.sub);
+            if (payload.typ === 'user' && !suspendedIds.has(id)) req.userId = id;
         } catch (err) {
             /* invalid or expired token: treat as a guest */
         }
