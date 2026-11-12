@@ -18,13 +18,17 @@ exports.smartSearchSuggestions = (req, res) => {
 
     // Only the columns the matcher reads. Deliberately NOT l.* so we don't
     // pull every listing's photo URLs/base64 just to count matches.
+    // NEW (Module 7): same visibility rule as the real search - hidden listings and
+    // listings of suspended landlords are not counted (a landlord still counts their own).
     const sql = `
         SELECT l.id, l.user_id, l.title, l.category, l.price, l.location,
                l.rooms, l.size, l.amenities
         FROM listings l
+        JOIN users u ON l.user_id = u.id
+        WHERE u.is_suspended = 0 AND (l.is_hidden = 0 OR l.user_id = ?)
     `;
 
-    db.query(sql, (err, rows) => {
+    db.query(sql, [req.userId || 0], (err, rows) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         const suggestions = suggestFallbacks(userQuery, rows, role, userId);
         res.json({ success: true, suggestions });
