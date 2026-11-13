@@ -8,7 +8,7 @@
 // user's name). It is saved as target_label so the Activity Log can show real
 // names, even if the listing or user changes later.
 //
-// The table and the target_label column are created automatically at startup.
+// The table and the target_label column are created automatically at startup. try
 
 const db = require('../config/db');
 
