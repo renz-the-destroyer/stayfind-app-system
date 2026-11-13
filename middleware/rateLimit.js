@@ -4,7 +4,7 @@
 // Needs `app.set('trust proxy', 1)` in server.js: Render puts a proxy in front
 // of the app, and without it every visitor would look like the same IP.
 //
-// Install:  npm install express-rate-limit
+// Install:  npm install express-rate-limit try
 
 const { rateLimit } = require('express-rate-limit');
 
