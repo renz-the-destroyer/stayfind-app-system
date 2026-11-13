@@ -3,7 +3,7 @@ const router = express.Router();
 const userController = require('../controllers/userController');
 const searchController = require('../controllers/searchController');
 const authController = require('../controllers/authController');
-// brute-force / spam limits (see middleware/rateLimit.js)
+// brute-force / spam limits (see middleware/rateLimit.js) try
 const { loginLimiter, signupLimiter, messageLimiter, reviewLimiter, appealLimiter } = require('../middleware/rateLimit');
 // login-token check (JWT) - see middleware/auth.js
 // optionalUser = lets guests through but still recognises logged-in users
