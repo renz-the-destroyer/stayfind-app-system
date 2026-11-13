@@ -23,7 +23,7 @@ router.get('/stats', adminController.getStats);
 router.get('/overview', adminController.getOverview);
 router.get('/audit-log', adminController.getAuditLog);
 
-// Users - view/edit and suspend/unsuspend. NO delete (Module 7).
+// Users - view/edit and suspend/unsuspend. NO delete.
 router.get('/users', adminController.getAllUsersAdmin);
 router.put('/users/:id', adminController.updateUserAdmin);
 router.post('/users/:id/suspend', adminController.suspendUser);
@@ -35,10 +35,12 @@ router.get('/landlord-requests/:id/documents', adminController.getLandlordReques
 router.post('/landlord-requests/:id/approve', adminController.approveLandlord);
 router.post('/landlord-requests/:id/reject', adminController.rejectLandlord);
 
-// Listings - view and hide/unhide only. NO edit and NO delete (Module 7).
+// Listings - view and hide/unhide only. NO edit and NO delete.
 router.get('/listings', adminController.getAllListingsAdmin);
 router.post('/listings/:id/hide', adminController.hideListing);
 router.post('/listings/:id/unhide', adminController.unhideListing);
+// NEW: decline a landlord's appeal (the listing stays hidden)
+router.post('/listings/:id/dismiss-appeal', adminController.dismissAppeal);
 
 // Reviews (moderation)
 router.get('/reviews', adminController.getAllReviewsAdmin);
