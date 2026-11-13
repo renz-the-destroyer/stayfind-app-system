@@ -799,7 +799,7 @@ function deleteListingWithDependents(listingId, ownerId, done) {
 
 exports.deleteListing = (req, res) => {
     const listingId = req.params.id;
-    const user_id = req.userId; // from the login token
+    const user_id = req.userId; // from the login token try
 
     deleteListingWithDependents(listingId, user_id, (err, affectedRows) => {
         if (err) {
