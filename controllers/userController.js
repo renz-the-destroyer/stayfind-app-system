@@ -65,7 +65,6 @@ exports.getUserById = (req, res) => {
 // 3. UPDATE USER PROFILE
 // - Contact must be an 11-digit PH mobile number starting with 09.
 // - The 30-day personal-info lock uses its OWN column, info_changed_at.
-//   Requires:  ALTER TABLE users ADD COLUMN info_changed_at DATETIME NULL;
 // - First-time setup (dashboard) doesn't start the 30-day timer.
 //
 // Landlord approval gate: picking "Landlord" doesn't grant the role. It REQUIRES
@@ -203,12 +202,12 @@ exports.updateProfile = (req, res) => {
 // Responds with { listings, page, limit, total, totalPages, hasMore }.
 // `all=true` skips pagination and returns every matching listing.
 //
-// NEW (Module 7) visibility rules:
+// Visibility rules:
 //   - The public feed NEVER includes listings an admin hid, or listings of
 //     suspended landlords.
 //   - A landlord looking at their OWN listings (role=landlord&user_id=<them>,
 //     confirmed against the login token) also gets their hidden ones, with
-//     is_hidden / hidden_reason, so they can see what was hidden and why.
+//     is_hidden / hidden_reason / appeal fields, so they can see what was hidden and why.
 exports.getAllListings = (req, res) => {
     const { role, user_id, page, limit, all } = req.query;
 
@@ -223,7 +222,6 @@ exports.getAllListings = (req, res) => {
     const conditions = [];
     const whereParams = [];
 
-    // Filter logic: if role is landlord, they ONLY see listings where they are the owner
     if (role === 'landlord' && user_id) {
         conditions.push('l.user_id = ?');
         whereParams.push(user_id);
@@ -316,15 +314,22 @@ exports.addListing = (req, res) => {
     });
 };
 
-// 6. ADD REVIEW (Supports Landlord Replies)
-// The reviewer is the logged-in user (from the token), the display name comes
-// from the DB, only the listing's own landlord can post a reply, and a landlord's
-// own listing never receives a star rating from them.
+// 6. ADD REVIEW (ratings, comments and landlord replies)
+// The reviewer is the logged-in user (from the token) and the display name
+// comes from the DB. Server-side rules (not just the UI):
+//   - only the listing's own landlord can reply
+//   - a reply must answer a real, top-level review of the SAME listing, and
+//     each review can only get ONE reply
+//   - a tenant's star rating counts ONCE per listing (extra ratings are ignored,
+//     a comment sent with one is still saved)
+//   - the landlord never rates their own listing
 exports.addReview = (req, res) => {
     const { listing_id, comment, rating, is_reply, parent_review_id } = req.body;
     const user_id = req.userId;
 
     if (!listing_id) return res.status(400).json({ success: false, message: 'listing_id is required.' });
+
+    const text = String(comment || '').trim().slice(0, 1000);
 
     const lookupSql = `SELECT u.full_name, l.user_id AS owner_id
                        FROM users u JOIN listings l ON l.id = ?
@@ -335,21 +340,100 @@ exports.addReview = (req, res) => {
 
         const { full_name, owner_id } = rows[0];
         const isOwner = Number(owner_id) === Number(user_id);
+        const wantsReply = !!is_reply;
 
-        if (is_reply && !isOwner) {
+        if (wantsReply && !isOwner) {
             return res.status(403).json({ success: false, message: 'Only the landlord of this listing can reply.' });
         }
 
-        const cleanRating = Math.min(5, Math.max(0, parseInt(rating) || 0));
-        const finalRating = (is_reply || isOwner) ? 0 : cleanRating;
-        const finalReplyStatus = is_reply ? 1 : 0;
-        const finalParentId = is_reply && parent_review_id ? parent_review_id : null;
+        const save = (finalRating, finalParentId, note) => {
+            const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
+            db.query(sql, [listing_id, user_id, full_name || 'User', text, finalRating, wantsReply ? 1 : 0, finalParentId], (err) => {
+                if (err) return res.status(500).json({ error: err.message });
+                listingsCache.clear(); // changes the listing's avg_rating/review_count
+                res.json({ success: true, message: (wantsReply ? 'Reply submitted!' : 'Review submitted!') + (note || '') });
+            });
+        };
 
-        const sql = `INSERT INTO reviews (listing_id, user_id, user_name, comment, rating, is_reply, parent_review_id) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-        db.query(sql, [listing_id, user_id, full_name || 'User', comment, finalRating, finalReplyStatus, finalParentId], (err) => {
-            if (err) return res.status(500).json({ error: err.message });
-            listingsCache.clear(); // changes the listing's avg_rating/review_count
-            res.json({ success: true, message: finalReplyStatus ? 'Reply submitted!' : 'Review submitted!' });
+        if (wantsReply) {
+            if (!text) return res.status(400).json({ success: false, message: 'Please write a reply before posting.' });
+
+            db.query('SELECT id, listing_id, is_reply FROM reviews WHERE id = ?', [parent_review_id], (pErr, pRows) => {
+                if (pErr) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+                const parent = pRows[0];
+                if (!parent || String(parent.listing_id) !== String(listing_id) || Number(parent.is_reply) === 1) {
+                    return res.status(400).json({ success: false, message: "That review can't be replied to." });
+                }
+                db.query('SELECT id FROM reviews WHERE parent_review_id = ? LIMIT 1', [parent.id], (dErr, dRows) => {
+                    if (dErr) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+                    if (dRows.length > 0) {
+                        return res.status(409).json({ success: false, message: 'You already replied to this review.' });
+                    }
+                    save(0, parent.id);
+                });
+            });
+            return;
+        }
+
+        const cleanRating = Math.min(5, Math.max(0, parseInt(rating) || 0));
+        if (isOwner || cleanRating === 0) return save(0, null);
+
+        db.query('SELECT id FROM reviews WHERE listing_id = ? AND user_id = ? AND rating > 0 LIMIT 1', [listing_id, user_id], (rErr, rRows) => {
+            if (rErr) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+            if (rRows.length === 0) return save(cleanRating, null);
+            if (!text) {
+                return res.status(409).json({ success: false, message: 'You already rated this listing. You can still leave a comment.' });
+            }
+            save(0, null, ' Your new rating was not counted because you already rated this listing.');
+        });
+    });
+};
+
+// 6b. DELETE A COMMENT (the landlord of the listing only)
+// To stop a landlord from erasing bad ratings, a tenant's review that carries a
+// star rating keeps its rating: only the TEXT is replaced. Replies and
+// unrated comments are deleted completely.
+const LANDLORD_REMOVED_TEXT = '[Comment removed by the landlord]';
+
+exports.deleteReview = (req, res) => {
+    const reviewId = req.params.id;
+    const sql = `SELECT r.id, r.is_reply, r.rating, r.comment, l.user_id AS owner_id
+                 FROM reviews r JOIN listings l ON r.listing_id = l.id
+                 WHERE r.id = ?`;
+
+    db.query(sql, [reviewId], (err, rows) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (rows.length === 0) return res.status(404).json({ success: false, message: 'Comment not found.' });
+
+        const r = rows[0];
+        if (Number(r.owner_id) !== Number(req.userId)) {
+            return res.status(403).json({ success: false, message: 'Only the landlord of this listing can delete its comments.' });
+        }
+
+        const done = (message) => {
+            listingsCache.clear();
+            res.json({ success: true, message });
+        };
+        const fail = () => res.status(500).json({ success: false, message: 'Could not delete the comment. Please try again.' });
+
+        const isReply = Number(r.is_reply) === 1;
+        const hasRating = Number(r.rating) > 0;
+
+        if (!isReply && hasRating) {
+            if (r.comment === LANDLORD_REMOVED_TEXT) return done('Comment already removed.');
+            return db.query('UPDATE reviews SET comment = ? WHERE id = ?', [LANDLORD_REMOVED_TEXT, reviewId], (uErr) => {
+                if (uErr) return fail();
+                done('Comment removed. The star rating still counts.');
+            });
+        }
+
+        // Reply or unrated comment: remove it (and any replies attached to it).
+        db.query('DELETE FROM reviews WHERE parent_review_id = ?', [reviewId], (cErr) => {
+            if (cErr) return fail();
+            db.query('DELETE FROM reviews WHERE id = ?', [reviewId], (dErr) => {
+                if (dErr) return fail();
+                done('Comment deleted.');
+            });
         });
     });
 };
@@ -401,6 +485,29 @@ exports.updateListing = (req, res) => {
     });
 };
 
+// 8b. APPEAL A HIDDEN LISTING (the landlord of the listing only)
+// One appeal per hide: it stays "pending" until an admin unhides the listing
+// or declines the appeal (which lets the landlord appeal again).
+exports.appealHiddenListing = (req, res) => {
+    const listingId = req.params.id;
+    const message = String(req.body.message || '').replace(/[<>]/g, '').trim().slice(0, 500);
+
+    if (message.length < 10) {
+        return res.status(400).json({ success: false, message: 'Please explain what you fixed, or why the listing should be shown (at least 10 characters).' });
+    }
+
+    const sql = `UPDATE listings SET appeal_message = ?, appeal_at = NOW()
+                 WHERE id = ? AND user_id = ? AND is_hidden = 1 AND appeal_at IS NULL`;
+    db.query(sql, [message, listingId, req.userId], (err, result) => {
+        if (err) return res.status(500).json({ success: false, message: 'Server error. Please try again.' });
+        if (result.affectedRows === 0) {
+            return res.status(409).json({ success: false, message: "This listing isn't hidden, isn't yours, or already has a pending appeal." });
+        }
+        listingsCache.clear();
+        res.json({ success: true, message: 'Appeal sent. An admin will review it.', appeal_at: new Date().toISOString() });
+    });
+};
+
 // 9. TOGGLE BOOKMARK
 exports.toggleBookmark = (req, res) => {
     const { listingId, action } = req.body;
@@ -433,8 +540,8 @@ exports.getBookmarks = (req, res) => {
 };
 
 // 11. SMART SEARCH (Taglish-aware, with Role Security)
-// NEW (Module 7): hidden listings and listings of suspended landlords are left
-// out; a landlord still finds their own hidden ones (is_hidden is on the row).
+// Hidden listings and listings of suspended landlords are left out; a landlord
+// still finds their own hidden ones.
 exports.smartSearch = (req, res) => {
     const userQuery = req.body.message || "";
     const { role, id: userId } = req.body.userContext || {}; 
@@ -485,6 +592,7 @@ exports.smartSearch = (req, res) => {
 // 12a. START (OR RESUME) A CONVERSATION
 // The tenant is the logged-in user (token) and the landlord is looked up from
 // the listing itself, so ids sent in the body are ignored.
+// NEW: no conversation can start about a hidden listing or with a suspended landlord.
 exports.startConversation = (req, res) => {
     const { listing_id } = req.body;
     const tenant_id = req.userId;
@@ -493,9 +601,15 @@ exports.startConversation = (req, res) => {
         return res.status(400).json({ success: false, message: 'listing_id is required.' });
     }
 
-    db.query('SELECT user_id FROM listings WHERE id = ?', [listing_id], (lErr, lRows) => {
+    const listingSql = `SELECT l.user_id, l.is_hidden, u.is_suspended
+                        FROM listings l JOIN users u ON l.user_id = u.id WHERE l.id = ?`;
+    db.query(listingSql, [listing_id], (lErr, lRows) => {
         if (lErr) return res.status(500).json({ error: lErr.message });
         if (lRows.length === 0) return res.status(404).json({ success: false, message: 'Listing not found.' });
+
+        if (Number(lRows[0].is_hidden) === 1 || Number(lRows[0].is_suspended) === 1) {
+            return res.status(403).json({ success: false, message: 'This listing is not available right now.' });
+        }
 
         const landlord_id = lRows[0].user_id;
         if (String(tenant_id) === String(landlord_id)) {
@@ -554,13 +668,23 @@ exports.getConversations = (req, res) => {
 };
 
 // Shared check: is the logged-in user one of the two people in this conversation?
+// callback(err, status, info) where info says whether the chat is still open.
 function checkConversationMember(conversationId, userId, callback) {
-    db.query('SELECT tenant_id, landlord_id FROM conversations WHERE id = ?', [conversationId], (err, rows) => {
+    const sql = `
+        SELECT c.tenant_id, c.landlord_id, l.is_hidden,
+               t.is_suspended AS tenant_suspended, ll.is_suspended AS landlord_suspended
+        FROM conversations c
+        JOIN listings l ON c.listing_id = l.id
+        JOIN users t ON c.tenant_id = t.id
+        JOIN users ll ON c.landlord_id = ll.id
+        WHERE c.id = ?`;
+    db.query(sql, [conversationId], (err, rows) => {
         if (err) return callback(err);
         if (rows.length === 0) return callback(null, 'not_found');
         const c = rows[0];
         const isMember = String(c.tenant_id) === String(userId) || String(c.landlord_id) === String(userId);
-        callback(null, isMember ? 'ok' : 'forbidden');
+        const closed = Number(c.is_hidden) === 1 || Number(c.tenant_suspended) === 1 || Number(c.landlord_suspended) === 1;
+        callback(null, isMember ? 'ok' : 'forbidden', { closed });
     });
 }
 
@@ -588,19 +712,24 @@ exports.getMessages = (req, res) => {
 };
 
 // 12d. SEND A MESSAGE - the sender is the logged-in user, and must be part of the conversation.
+// NEW: sending is refused while the listing is hidden or either person is suspended
+// (reading the old messages still works).
 exports.sendMessage = (req, res) => {
     const { conversation_id, message } = req.body;
     const sender_id = req.userId;
-    const trimmed = (message || '').trim();
+    const trimmed = (message || '').trim().slice(0, 2000);
 
     if (!conversation_id || !trimmed) {
         return res.status(400).json({ success: false, message: 'conversation_id and a non-empty message are required.' });
     }
 
-    checkConversationMember(conversation_id, sender_id, (memberErr, status) => {
+    checkConversationMember(conversation_id, sender_id, (memberErr, status, info) => {
         if (memberErr) return res.status(500).json({ error: memberErr.message });
         if (status === 'not_found') return res.status(404).json({ success: false, message: 'Conversation not found' });
         if (status === 'forbidden') return res.status(403).json({ success: false, message: 'Forbidden' });
+        if (info && info.closed) {
+            return res.status(403).json({ success: false, message: 'This conversation is closed because the listing is currently unavailable.' });
+        }
 
         const insertSql = `INSERT INTO messages (conversation_id, sender_id, message) VALUES (?, ?, ?)`;
         db.query(insertSql, [conversation_id, sender_id, trimmed], (err, result) => {
@@ -622,7 +751,7 @@ exports.sendMessage = (req, res) => {
 // ============================================================================
 // Deletes a listing AND everything that points at it (reviews, bookmarks, chat
 // conversations + their messages), all-or-nothing in ONE transaction, and only
-// if this landlord owns it. (Admins can no longer delete listings - Module 7.)
+// if this landlord owns it. (Admins can't delete listings.)
 function deleteListingWithDependents(listingId, ownerId, done) {
     db.getConnection((connErr, conn) => {
         if (connErr) return done(connErr);
@@ -635,7 +764,6 @@ function deleteListingWithDependents(listingId, ownerId, done) {
             conn.query('SELECT id FROM listings WHERE id = ? AND user_id = ?', [listingId, ownerId], (checkErr, rows) => {
                 if (checkErr) return fail(checkErr);
                 if (rows.length === 0) {
-                    // Not found, or not this landlord's listing: change nothing.
                     return conn.rollback(() => { conn.release(); done(null, 0); });
                 }
 
