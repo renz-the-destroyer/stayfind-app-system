@@ -29,3 +29,30 @@ exports.signupLimiter = rateLimit({
     legacyHeaders: false,
     message: tooMany('Too many sign-up attempts. Please try again later.')
 });
+
+// NEW: sending chat messages: 20 per minute.
+exports.messageLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 20,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: tooMany('You are sending messages too fast. Please slow down.')
+});
+
+// NEW: posting reviews, comments and replies: 15 per 10 minutes.
+exports.reviewLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 15,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: tooMany('Too many reviews or comments in a short time. Please try again later.')
+});
+
+// NEW: appeals for hidden listings: 5 per hour.
+exports.appealLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000,
+    limit: 5,
+    standardHeaders: 'draft-7',
+    legacyHeaders: false,
+    message: tooMany('Too many appeals. Please try again later.')
+});
