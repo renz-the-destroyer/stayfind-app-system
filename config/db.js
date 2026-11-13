@@ -8,22 +8,25 @@ const pool = mysql.createPool({
     database: process.env.DB_NAME,
     port: 3306, 
     waitForConnections: true,
-    // UPDATED: was 10. Clever Cloud's free DEV database only allows 5
-    // connections per user ("max_user_connections"), and Render runs the old
-    // and new server at the same time during a deploy, so 10 could never fit.
-    // Requests beyond this limit now simply wait in line (queueLimit: 0 means
-    // the waiting line has no size limit) instead of failing.
+    // Clever Cloud's free DEV database only allows 5 connections per user, and
+    // Render runs the old and new server at the same time during a deploy.
     connectionLimit: 3,
-    // NEW: give unused connections back quickly so they don't hog the 5 slots.
     maxIdle: 2,
     idleTimeout: 30000, // close a connection after 30 seconds without use
-    // NEW: keeps open connections alive so the database host doesn't silently drop them.
     enableKeepAlive: true,
     keepAliveInitialDelay: 10000,
-    queueLimit: 0
+    queueLimit: 0,
+    // NEW: Node reads and writes dates as UTC...
+    timezone: 'Z'
 });
 
-// ADD THIS: Verification test
+// NEW: ...and every database connection is forced to UTC too, so dates, NOW()
+// and the Activity Log date filter can never disagree about the timezone.
+pool.on('connection', (connection) => {
+    connection.query("SET time_zone = '+00:00'");
+});
+
+// Verification test
 pool.getConnection((err, connection) => {
     if (err) {
         console.error('❌ Database connection failed:', err.message);
