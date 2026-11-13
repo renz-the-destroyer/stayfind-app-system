@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const adminController = require('../controllers/adminController');
-// limit failed admin logins (see middleware/rateLimit.js)
+// limit failed admin logins (see middleware/rateLimit.js) try
 const { loginLimiter } = require('../middleware/rateLimit');
 // records every change made through the admin panel
 const { auditAdminActions } = require('../middleware/auditLog');
