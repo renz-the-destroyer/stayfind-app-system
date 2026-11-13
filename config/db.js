@@ -8,7 +8,7 @@ const pool = mysql.createPool({
     database: process.env.DB_NAME,
     port: 3306, 
     waitForConnections: true,
-    // Clever Cloud's free DEV database only allows 5 connections per user, and
+    // Clever Cloud's free DEV database only allows 5 connections per user, and try
     // Render runs the old and new server at the same time during a deploy.
     connectionLimit: 3,
     maxIdle: 2,
